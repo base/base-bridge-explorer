@@ -1,26 +1,100 @@
 @import "tailwindcss";
 
 :root {
+  /* Base brand tokens */
+  --brand: #0052ff; /* Base blue */
+  --brand-600: #0046e0; /* deeper brand shade */
+  --brand-50: #e8f0ff; /* subtle tint for light surfaces */
+
+  /* App surfaces */
   --background: #ffffff;
-  --foreground: #171717;
+  --foreground: #0f172a; /* slate-900 like */
+  --muted-foreground: #64748b; /* slate-500 like */
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-brand: var(--brand);
+  --color-brand-600: var(--brand-600);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #07090f; /* near-black with a hint of blue */
+    --foreground: #e6e6eb;
+    --muted-foreground: #a1a1aa;
   }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system,
+    Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji",
+    "Segoe UI Emoji";
+}
+
+/* Text selection */
+::selection {
+  background: color-mix(in oklab, var(--brand) 24%, transparent);
+}
+
+/* Links */
+a {
+  color: var(--brand);
+}
+a:hover {
+  color: var(--brand-600);
+}
+
+/* Ambient, Apple-like background layers (fixed, behind content) */
+.bg-layers {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(
+      600px 600px at 20% -10%,
+      color-mix(in oklab, var(--brand) 20%, transparent) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      500px 500px at 85% 0%,
+      color-mix(in oklab, #00e0ff 18%, transparent) 0%,
+      transparent 60%
+    ),
+    radial-gradient(
+      700px 700px at 70% 85%,
+      color-mix(in oklab, var(--brand-600) 14%, transparent) 0%,
+      transparent 60%
+    );
+}
+
+/* Subtle grid overlay for depth */
+.bg-grid::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+      rgba(127, 127, 127, 0.08) 1px,
+      transparent 1px
+    ),
+    linear-gradient(90deg, rgba(127, 127, 127, 0.08) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(100% 70% at 50% 0%, black, transparent);
+}
+
+/* Elevated surface for cards/forms */
+.surface {
+  background: color-mix(in oklab, var(--background) 92%, var(--brand) 8%);
+  border: 1px solid color-mix(in oklab, var(--brand) 18%, transparent);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 1px 2px rgba(15, 23, 42, 0.08), 0 8px 24px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(8px);
 }

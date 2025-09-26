@@ -1,103 +1,542 @@
-import Image from "next/image";
+"use client";
+
+import { useMemo, useState } from "react";
+import {
+  Address,
+  createPublicClient,
+  decodeEventLog,
+  Hash,
+  http,
+  zeroAddress,
+} from "viem";
+import { baseSepolia } from "viem/chains";
+import Bridge from "../../abis/Bridge";
+import ERC20 from "../../abis/ERC20";
+
+type InputKind = "solana" | "base" | "unknown";
+
+enum BridgeStatus {
+  Pending = "pending",
+  Validated = "pre-validated",
+  Executed = "executed",
+}
+
+type ChainName = "Solana" | "Base" | "Solana Devnet" | "Base Sepolia";
+
+interface InitialTxDetails {
+  amount: string;
+  asset: string;
+  chain: ChainName;
+  senderAddress: string;
+  transactionHash: string;
+  timestamp: string;
+}
+
+interface ExecuteTxDetails {
+  amount: string;
+  asset: string;
+  chain: ChainName;
+  receiverAddress: string;
+  transactionHash: string;
+  timestamp: string;
+}
+
+interface BridgeQueryResult {
+  isBridgeRelated: boolean;
+  status?: BridgeStatus;
+  initialTx?: InitialTxDetails;
+  executeTx?: ExecuteTxDetails;
+}
+
+const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
+  "0x68bfb2e57fcbb47277da442d81d3e40ff118cbbcaf345b07997b35f592359e49";
+const TRANSFER_FINALIZED_TOPIC =
+  "0x6899b9db6ebabd932aa1fc835134c9b9ca2168d78a4cbee8854b1c00c8647609";
+const MESSAGE_REGISTERED_TOPIC =
+  "0x5e55930eb861ee57d9b7fa9e506b7f413cb1599c9886e57f1c8091f5fee5fc33";
+
+const bridgeAddress = {
+  8453: "", // Base Mainnet
+  84532: "0xB2068ECCDb908902C76E3f965c1712a9cF64171E", // Base Sepolia
+};
+const bridgeValidatorAddress = {
+  8453: "", // Base Mainnet
+  84532: "0x8D2cD165360ACF5f0145661a8FB0Ff5D3729Ef9A", // Base Sepolia
+};
+
+function detectInputKind(value: string): InputKind {
+  const v = value.trim();
+  if (v.length === 0) return "unknown";
+
+  // Base transaction hash: 0x-prefixed 32-byte hex (64 hex chars)
+  if (/^0x[0-9a-fA-F]{64}$/.test(v)) {
+    return "base";
+  }
+
+  // Solana transaction signature: base58, typically 87 or 88 chars, but can vary 43-88
+  // Base58: 1-9A-HJ-NP-Za-km-z (no 0 O I l)
+  const base58Pattern = /^[1-9A-HJ-NP-Za-km-z]+$/;
+  if (v.length >= 43 && v.length <= 88 && base58Pattern.test(v)) {
+    return "solana";
+  }
+
+  return "unknown";
+}
+
+// Formats a big integer value given its token decimals into a human-friendly string
+function formatUnitsString(
+  value: string,
+  decimals: number,
+  maxFractionDigits = 6
+): string {
+  const isNegative = value.startsWith("-");
+  const digits = isNegative ? value.slice(1) : value;
+  const trimmed = digits.replace(/^0+/, "") || "0";
+
+  if (decimals === 0) {
+    return (isNegative ? "-" : "") + trimmed;
+  }
+
+  const padded = trimmed.padStart(decimals + 1, "0");
+  const integerPart = padded.slice(0, padded.length - decimals);
+  let fractionPart = padded.slice(padded.length - decimals);
+
+  // Trim trailing zeros, then clamp to maxFractionDigits
+  fractionPart = fractionPart.replace(/0+$/, "");
+  if (fractionPart.length > maxFractionDigits) {
+    fractionPart = fractionPart.slice(0, maxFractionDigits);
+  }
+
+  return (
+    (isNegative ? "-" : "") +
+    integerPart +
+    (fractionPart ? `.${fractionPart}` : "")
+  );
+}
+
+async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
+  const chainId = baseSepolia.id;
+  const chainName = baseSepolia.name;
+  const client = createPublicClient({
+    chain: baseSepolia,
+    transport: http(),
+  });
+  const receipt = await client.getTransactionReceipt({ hash });
+  console.log({ receipt });
+  const { logs } = receipt;
+
+  let messageRegistered = false;
+  let messageSuccessfullyRelayed = false;
+  let transferFinalized = false;
+  let bridgeSeen = false;
+  let receiverAddress = "";
+  let asset = "";
+  let localToken: Address = zeroAddress;
+  let amount = "0";
+  let decimals = 18;
+  for (let i = 0; i < logs.length; i++) {
+    const log = logs[i];
+    if (
+      log.address.toLowerCase() ===
+        bridgeValidatorAddress[chainId].toLowerCase() ||
+      log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase()
+    ) {
+      bridgeSeen = true;
+    }
+
+    if (
+      log.address.toLowerCase() ===
+        bridgeValidatorAddress[chainId].toLowerCase() &&
+      log.topics[0] === MESSAGE_REGISTERED_TOPIC
+    ) {
+      messageRegistered = true;
+    } else if (
+      log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase() &&
+      log.topics[0] === TRANSFER_FINALIZED_TOPIC
+    ) {
+      transferFinalized = true;
+      const decodedData = decodeEventLog({
+        abi: Bridge,
+        data: log.data,
+        topics: log.topics,
+      }) as {
+        eventName: string;
+        args: {
+          localToken: `0x${string}`;
+          remoteToken: `0x${string}`;
+          to: `0x${string}`;
+          amount: bigint;
+        };
+      };
+      amount = String(decodedData.args.amount);
+      receiverAddress = String(decodedData.args.to);
+      localToken = decodedData.args.localToken;
+    } else if (
+      log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase() &&
+      log.topics[0] === MESSAGE_SUCCESSFULLY_RELAYED_TOPIC
+    ) {
+      messageSuccessfullyRelayed = true;
+    }
+  }
+
+  const calls: any = [client.getBlock({ blockHash: receipt.blockHash })];
+  if (localToken !== zeroAddress) {
+    calls.push(
+      client.multicall({
+        contracts: [
+          {
+            address: localToken,
+            abi: ERC20,
+            functionName: "symbol",
+          },
+          {
+            address: localToken,
+            abi: ERC20,
+            functionName: "decimals",
+          },
+        ],
+      })
+    );
+  }
+
+  const [block, multicallResults] = await Promise.all(calls);
+
+  const [assetRes, decimalsRes] = multicallResults;
+  if (assetRes.status === "success") {
+    asset = assetRes.result;
+  }
+  if (decimalsRes.status === "success") {
+    decimals = decimalsRes.result;
+  }
+
+  console.log({
+    messageRegistered,
+    messageSuccessfullyRelayed,
+    transferFinalized,
+    bridgeSeen,
+  });
+
+  if (!bridgeSeen) {
+    throw new Error("Transaction not recognized");
+  }
+
+  return {
+    amount: formatUnitsString(amount, decimals),
+    asset,
+    chain: chainName,
+    receiverAddress,
+    transactionHash: hash,
+    timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+  };
+}
+
+async function lookupSolanaInitialTx(
+  signature: string
+): Promise<InitialTxDetails> {
+  // Using Solscan public API due to common CORS restrictions on public Solana RPCs
+  const baseUrl = `https://public-api.solscan.io/transaction/${signature}`;
+  const urls = [
+    baseUrl, // mainnet default
+    `${baseUrl}?cluster=testnet`,
+    `${baseUrl}?cluster=devnet`,
+  ];
+
+  let lastError: unknown = null;
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers: { accept: "application/json" } });
+      if (!res.ok) {
+        lastError = new Error(
+          `Failed to fetch Solana transaction from ${url}: ${res.status}`
+        );
+        continue;
+      }
+      const json: any = await res.json();
+
+      // Prefer token transfer details if present; otherwise, show SOL lamports
+      let amount = "0";
+      let asset = "SOL";
+      const tokenTransfers: any[] = Array.isArray(json?.tokenTransfers)
+        ? json.tokenTransfers
+        : [];
+      if (tokenTransfers.length > 0) {
+        const t = tokenTransfers[0];
+        const valueStr: string = String(t?.amount ?? t?.value ?? "0");
+        // Many explorers return already-decimalized amount for Solana tokens. Keep as-is.
+        amount = valueStr;
+        asset = String(t?.tokenSymbol ?? t?.symbol ?? "TOKEN");
+      } else {
+        const lamports: string = String(json?.lamport ?? json?.fee ?? "0");
+        amount = formatUnitsString(lamports, 9);
+        asset = "SOL";
+      }
+
+      const signer: string =
+        Array.isArray(json?.signer) && json.signer.length > 0
+          ? String(json.signer[0])
+          : "";
+      const blockTime: number | undefined =
+        typeof json?.blockTime === "number" ? json.blockTime : undefined;
+
+      return {
+        amount,
+        asset,
+        chain: "Solana",
+        senderAddress: signer,
+        transactionHash: signature,
+        timestamp: blockTime
+          ? new Date(blockTime * 1000).toISOString()
+          : new Date().toISOString(),
+      };
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(
+        "Failed to fetch Solana transaction on mainnet, testnet, or devnet"
+      );
+}
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [transactionHash, setTransactionHash] = useState("");
+  const kind = useMemo(
+    () => detectInputKind(transactionHash),
+    [transactionHash]
+  );
+  const [result, setResult] = useState<BridgeQueryResult | null>(null);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
+  const isValid = kind !== "unknown";
+  const helperText =
+    kind === "solana"
+      ? "Detected Solana signature"
+      : kind === "base"
+      ? "Detected Base transaction hash"
+      : transactionHash
+      ? "Enter a Solana signature (base58) or Base tx hash (0x...)"
+      : "";
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    // One-page app for now; no navigation yet.
+    if (!isValid) return;
+  }
+
+  async function handleExploreClick() {
+    if (kind === "unknown") {
+      return;
+    }
+
+    try {
+      if (kind === "base") {
+        const executeTx = await lookupBaseTxReceipt(
+          transactionHash.trim() as Hash
+        );
+        const r: BridgeQueryResult = {
+          isBridgeRelated: true,
+          executeTx,
+          status: executeTx ? BridgeStatus.Executed : BridgeStatus.Pending,
+        };
+        setResult(r);
+      } else {
+        const initialTx = await lookupSolanaInitialTx(transactionHash.trim());
+        const r: BridgeQueryResult = {
+          isBridgeRelated: true,
+          initialTx,
+        };
+        setResult(r);
+      }
+    } catch (err) {
+      console.error(err);
+      setResult({ isBridgeRelated: false });
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6 py-16">
+      <main className="relative w-full max-w-2xl">
+        <header className="mb-10 text-center">
+          <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/60 dark:bg-white/5 px-3 py-1 backdrop-blur-sm">
+            <span
+              className="h-2 w-2 rounded-full"
+              style={{ background: "var(--brand)" }}
             />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            <span className="text-xs text-[var(--color-muted-foreground)]">
+              Base • Bridge Explorer
+            </span>
+          </div>
+          <h1 className="mt-5 text-4xl md:text-5xl font-semibold tracking-tight">
+            Explore cross-chain transactions
+          </h1>
+          <p className="mt-3 text-[15px] text-[var(--color-muted-foreground)]">
+            Paste a Solana signature or Base transaction hash to get started.
+          </p>
+        </header>
+
+        <form onSubmit={handleSubmit} className="surface rounded-xl p-4 md:p-5">
+          <label
+            htmlFor="query"
+            className="block text-sm font-medium mb-2 text-[var(--color-muted-foreground)]"
           >
-            Read our docs
-          </a>
-        </div>
+            Transaction identifier
+          </label>
+          <div className="flex items-center gap-3">
+            <input
+              id="query"
+              name="query"
+              value={transactionHash}
+              onChange={(e) => setTransactionHash(e.target.value)}
+              placeholder="e.g. 0x... or 5NTf..."
+              className="w-full h-12 px-4 rounded-md bg-white/70 dark:bg-white/5 outline-none border border-black/10 dark:border-white/10 focus:ring-4 focus:ring-[color:var(--brand)]/30"
+              autoComplete="off"
+              spellCheck={false}
+              inputMode="text"
+            />
+            <button
+              type="submit"
+              onClick={handleExploreClick}
+              disabled={!isValid}
+              className="h-12 px-5 rounded-md text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: "var(--brand)" }}
+            >
+              Explore
+            </button>
+          </div>
+          {helperText ? (
+            <p
+              className={`mt-2 text-sm ${
+                isValid
+                  ? "text-green-600"
+                  : "text-[var(--color-muted-foreground)]"
+              }`}
+            >
+              {helperText}
+            </p>
+          ) : null}
+          <div className="mt-3 text-sm text-[var(--color-muted-foreground)]">
+            {kind === "solana" && "Solana"}
+            {kind === "base" && "Base"}
+            {kind === "unknown" && transactionHash && "Unrecognized format"}
+          </div>
+        </form>
+        {result ? (
+          <section className="mt-6 surface rounded-xl p-4 md:p-5">
+            <h2 className="text-lg font-semibold tracking-tight">Result</h2>
+            <div className="mt-2 text-sm text-[var(--color-muted-foreground)]">
+              {result.isBridgeRelated
+                ? "This transaction is part of a cross-chain bridge process."
+                : "This transaction is not related to the bridge."}
+            </div>
+            {result.isBridgeRelated && (
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-sm font-medium text-[var(--color-muted-foreground)]">
+                    Status
+                  </div>
+                  <div className="mt-1 text-base">{result.status ?? "—"}</div>
+                </div>
+                <div className="hidden md:block" />
+
+                <div className="col-span-1 md:col-span-1">
+                  <h3 className="text-base font-semibold mt-2">Initial tx</h3>
+                  <div className="mt-2 space-y-1 text-sm">
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Amount transferred
+                      </span>
+                      <div>{result.initialTx?.amount ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Asset
+                      </span>
+                      <div>{result.initialTx?.asset ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Chain
+                      </span>
+                      <div>{result.initialTx?.chain ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Sender Address
+                      </span>
+                      <div className="break-all">
+                        {result.initialTx?.senderAddress ?? "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Transaction Hash
+                      </span>
+                      <div className="break-all">
+                        {result.initialTx?.transactionHash ?? "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Timestamp
+                      </span>
+                      <div>{result.initialTx?.timestamp ?? "—"}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="col-span-1 md:col-span-1">
+                  <h3 className="text-base font-semibold mt-2">Execute tx</h3>
+                  <div className="mt-2 space-y-1 text-sm">
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Amount transferred
+                      </span>
+                      <div>{result.executeTx?.amount ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Asset
+                      </span>
+                      <div>{result.executeTx?.asset ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Chain
+                      </span>
+                      <div>{result.executeTx?.chain ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Receiver Address
+                      </span>
+                      <div className="break-all">
+                        {result.executeTx?.receiverAddress ?? "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Transaction Hash
+                      </span>
+                      <div className="break-all">
+                        {result.executeTx?.transactionHash ?? "—"}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Timestamp
+                      </span>
+                      <div>{result.executeTx?.timestamp ?? "—"}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        ) : null}
       </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
     </div>
   );
 }
