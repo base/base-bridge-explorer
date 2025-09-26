@@ -6,12 +6,22 @@ import {
   createPublicClient,
   decodeEventLog,
   Hash,
+  Hex,
   http,
   zeroAddress,
 } from "viem";
-import { baseSepolia } from "viem/chains";
+import { base, baseSepolia } from "viem/chains";
 import Bridge from "../../abis/Bridge";
 import ERC20 from "../../abis/ERC20";
+import {
+  createSolanaRpc,
+  devnet,
+  mainnet,
+  Signature,
+  address,
+} from "@solana/kit";
+import { fetchMaybeOutgoingMessage } from "../../clients/ts/src/bridge";
+import { deriveMessageHash } from "@/utils/evm";
 
 type InputKind = "solana" | "base" | "unknown";
 
@@ -21,7 +31,12 @@ enum BridgeStatus {
   Executed = "executed",
 }
 
-type ChainName = "Solana" | "Base" | "Solana Devnet" | "Base Sepolia";
+enum ChainName {
+  Solana = "Solana",
+  Base = "Base",
+  SolanaDevnet = "Solana Devnet",
+  BaseSepolia = "Base Sepolia",
+}
 
 interface InitialTxDetails {
   amount: string;
@@ -33,6 +48,7 @@ interface InitialTxDetails {
 }
 
 interface ExecuteTxDetails {
+  status: string;
   amount: string;
   asset: string;
   chain: ChainName;
@@ -50,10 +66,14 @@ interface BridgeQueryResult {
 
 const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
   "0x68bfb2e57fcbb47277da442d81d3e40ff118cbbcaf345b07997b35f592359e49";
+const FAILED_TO_RELAY_MESSAGE_TOPIC =
+  "0x1dc47a66003d9a2334f04c3d23d98f174d7e65e9a4a72fa13277a15120c1559e";
 const TRANSFER_FINALIZED_TOPIC =
   "0x6899b9db6ebabd932aa1fc835134c9b9ca2168d78a4cbee8854b1c00c8647609";
 const MESSAGE_REGISTERED_TOPIC =
   "0x5e55930eb861ee57d9b7fa9e506b7f413cb1599c9886e57f1c8091f5fee5fc33";
+
+const SOL_ADDRESS = "SoL1111111111111111111111111111111111111111";
 
 const bridgeAddress = {
   8453: "", // Base Mainnet
@@ -62,6 +82,10 @@ const bridgeAddress = {
 const bridgeValidatorAddress = {
   8453: "", // Base Mainnet
   84532: "0x8D2cD165360ACF5f0145661a8FB0Ff5D3729Ef9A", // Base Sepolia
+};
+const bridgeProgram = {
+  [ChainName.Solana]: "",
+  [ChainName.SolanaDevnet]: "HSvNvzehozUpYhRBuCKq3Fq8udpRocTmGMUYXmCSiCCc",
 };
 
 function detectInputKind(value: string): InputKind {
@@ -114,9 +138,92 @@ function formatUnitsString(
   );
 }
 
+async function lookupBaseDelivery(
+  msgHash: Hex,
+  isMainnet: boolean
+): Promise<ExecuteTxDetails> {
+  console.log({ msgHash });
+
+  const chainId = isMainnet ? base.id : baseSepolia.id;
+  const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
+  const client = createPublicClient({
+    chain: isMainnet ? base : baseSepolia,
+    transport: http("https://base-sepolia.cbhq.net"),
+  });
+
+  let transactionHash = "";
+  let timestamp = "";
+  let status = "";
+
+  const res = await fetch(
+    `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
+  );
+
+  if (res.ok) {
+    const json = await res.json();
+    console.log({ json });
+    const logs = json.result;
+    if (logs.length > 0) {
+      const [log] = logs;
+      const prevalidatedBlockHash = log.blockHash;
+      const prevalidatedTransactionHash = log.transactionHash;
+      const block = await client.getBlock({ blockHash: prevalidatedBlockHash });
+      const prevalidatedTimestamp = block.timestamp;
+      console.log({ prevalidatedTransactionHash, prevalidatedTimestamp });
+
+      const res = await fetch(
+        `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_SUCCESSFULLY_RELAYED_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
+      );
+
+      if (res.ok) {
+        const json = await res.json();
+        console.log({ deliveredRes: json });
+        const deliveredLogs = json.result;
+
+        if (deliveredLogs.length > 0) {
+          const [log] = deliveredLogs;
+          const executedBlockHash = log.blockHash;
+          const executedTransactionHash = log.transactionHash;
+          const block = await client.getBlock({ blockHash: executedBlockHash });
+          const executedTimestamp = block.timestamp;
+          timestamp = new Date(Number(executedTimestamp) * 1000).toString();
+          transactionHash = executedTransactionHash;
+          return await lookupBaseTxReceipt(executedTransactionHash);
+        }
+      } else {
+        // Check if attempted
+        const res = await fetch(
+          `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${FAILED_TO_RELAY_MESSAGE_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
+        );
+
+        if (res.ok) {
+          const json = await res.json();
+          console.log({ failedDeliveredRes: json });
+          const failureLogs = json.result;
+
+          if (failureLogs.length > 0) {
+            // Message execution was attempted but failed
+            status = "failed";
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    status,
+    amount: "0",
+    asset: "",
+    chain: chainName,
+    receiverAddress: "",
+    transactionHash,
+    timestamp,
+  };
+}
+
 async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
   const chainId = baseSepolia.id;
-  const chainName = baseSepolia.name;
+  const chainName = ChainName.BaseSepolia;
   const client = createPublicClient({
     chain: baseSepolia,
     transport: http(),
@@ -221,6 +328,7 @@ async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
   }
 
   return {
+    status: "success",
     amount: formatUnitsString(amount, decimals),
     asset,
     chain: chainName,
@@ -232,74 +340,107 @@ async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
 
 async function lookupSolanaInitialTx(
   signature: string
-): Promise<InitialTxDetails> {
-  // Using Solscan public API due to common CORS restrictions on public Solana RPCs
-  const baseUrl = `https://public-api.solscan.io/transaction/${signature}`;
-  const urls = [
-    baseUrl, // mainnet default
-    `${baseUrl}?cluster=testnet`,
-    `${baseUrl}?cluster=devnet`,
-  ];
+): Promise<[InitialTxDetails, ExecuteTxDetails | undefined]> {
+  const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
+  const devnetUrl = devnet("https://api.devnet.solana.com");
+  const mainnetRpc = createSolanaRpc(mainnetUrl);
+  const devnetRpc = createSolanaRpc(devnetUrl);
+  const isMainnet = false;
+  const rpc = devnetRpc;
+  const transaction = await rpc
+    .getTransaction(signature as Signature, { encoding: "jsonParsed" })
+    .send();
+  console.log({ transaction });
 
-  let lastError: unknown = null;
+  let senderAddress = "";
+  let asset = "";
+  let amount = "0";
+  let executeTx;
 
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { headers: { accept: "application/json" } });
-      if (!res.ok) {
-        lastError = new Error(
-          `Failed to fetch Solana transaction from ${url}: ${res.status}`
-        );
-        continue;
-      }
-      const json: any = await res.json();
+  if (!transaction) {
+    throw new Error("Solana transaction not found");
+  }
 
-      // Prefer token transfer details if present; otherwise, show SOL lamports
-      let amount = "0";
-      let asset = "SOL";
-      const tokenTransfers: any[] = Array.isArray(json?.tokenTransfers)
-        ? json.tokenTransfers
-        : [];
-      if (tokenTransfers.length > 0) {
-        const t = tokenTransfers[0];
-        const valueStr: string = String(t?.amount ?? t?.value ?? "0");
-        // Many explorers return already-decimalized amount for Solana tokens. Keep as-is.
-        amount = valueStr;
-        asset = String(t?.tokenSymbol ?? t?.symbol ?? "TOKEN");
-      } else {
-        const lamports: string = String(json?.lamport ?? json?.fee ?? "0");
-        amount = formatUnitsString(lamports, 9);
-        asset = "SOL";
-      }
+  const { message } = transaction.transaction;
 
-      const signer: string =
-        Array.isArray(json?.signer) && json.signer.length > 0
-          ? String(json.signer[0])
-          : "";
-      const blockTime: number | undefined =
-        typeof json?.blockTime === "number" ? json.blockTime : undefined;
+  let bridgeSeen = false;
+  const newAccounts = [];
 
-      return {
-        amount,
-        asset,
-        chain: "Solana",
-        senderAddress: signer,
-        transactionHash: signature,
-        timestamp: blockTime
-          ? new Date(blockTime * 1000).toISOString()
-          : new Date().toISOString(),
-      };
-    } catch (err) {
-      lastError = err;
-      continue;
+  for (let i = 0; i < message.instructions.length; i++) {
+    const ix = message.instructions[i];
+    if (ix.programId === bridgeProgram[ChainName.SolanaDevnet]) {
+      bridgeSeen = true;
     }
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(
-        "Failed to fetch Solana transaction on mainnet, testnet, or devnet"
-      );
+  console.log({ bridgeSeen });
+
+  if (!bridgeSeen) {
+    throw new Error("Transaction not recognized");
+  }
+
+  const innerInstructions = transaction.meta?.innerInstructions ?? [];
+
+  for (let i = 0; i < innerInstructions.length; i++) {
+    const { instructions } = innerInstructions[i];
+
+    for (let j = 0; j < instructions.length; j++) {
+      const ix = instructions[j];
+      if (!("parsed" in ix) || ix.parsed.type !== "createAccount") {
+        continue;
+      }
+
+      const info = ix.parsed.info;
+
+      if (!info || !("owner" in info) || !("newAccount" in info)) {
+        continue;
+      }
+
+      if (info.owner === bridgeProgram[ChainName.SolanaDevnet]) {
+        newAccounts.push(info.newAccount);
+        const acct = await fetchMaybeOutgoingMessage(
+          rpc,
+          address(info.newAccount as string)
+        );
+
+        console.log({ acct });
+        if (!acct.exists) {
+          continue;
+        }
+        senderAddress = acct.data.sender ?? "";
+
+        if (acct.data.message.__kind === "Transfer") {
+          const msg = acct.data.message.fields[0];
+          amount = msg.amount.toString();
+
+          if (msg.localToken === SOL_ADDRESS) {
+            asset = "SOL";
+            amount = String(Number(msg.amount) / 1_000_000_000);
+          } else {
+            // Figure out what localToken is
+            asset = "unknown SPL";
+          }
+        }
+
+        const msgHash = deriveMessageHash(acct);
+        executeTx = await lookupBaseDelivery(msgHash, isMainnet);
+      }
+    }
+  }
+
+  return [
+    {
+      amount,
+      asset,
+      chain: ChainName.SolanaDevnet,
+      senderAddress,
+      transactionHash: signature,
+      timestamp: new Date(
+        Number(transaction?.blockTime ?? 0) * 1000
+      ).toString(),
+    },
+    executeTx,
+  ];
 }
 
 export default function Home() {
@@ -343,10 +484,14 @@ export default function Home() {
         };
         setResult(r);
       } else {
-        const initialTx = await lookupSolanaInitialTx(transactionHash.trim());
+        const [initialTx, executeTx] = await lookupSolanaInitialTx(
+          transactionHash.trim()
+        );
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
           initialTx,
+          executeTx,
+          status: executeTx ? BridgeStatus.Executed : BridgeStatus.Pending,
         };
         setResult(r);
       }
