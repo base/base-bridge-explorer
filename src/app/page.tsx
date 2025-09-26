@@ -107,6 +107,22 @@ function detectInputKind(value: string): InputKind {
   return "unknown";
 }
 
+function getExplorerTxUrl(chain: ChainName, tx: string): string | undefined {
+  if (!tx) return undefined;
+  switch (chain) {
+    case ChainName.Solana:
+      return `https://explorer.solana.com/tx/${tx}`;
+    case ChainName.SolanaDevnet:
+      return `https://explorer.solana.com/tx/${tx}?cluster=devnet`;
+    case ChainName.Base:
+      return `https://basescan.org/tx/${tx}`;
+    case ChainName.BaseSepolia:
+      return `https://sepolia.basescan.org/tx/${tx}`;
+    default:
+      return undefined;
+  }
+}
+
 // Formats a big integer value given its token decimals into a human-friendly string
 function formatUnitsString(
   value: string,
@@ -652,7 +668,23 @@ export default function Home() {
                         Transaction Hash
                       </span>
                       <div className="break-all">
-                        {result.initialTx?.transactionHash ?? "—"}
+                        {result.initialTx?.transactionHash ? (
+                          <a
+                            href={
+                              getExplorerTxUrl(
+                                result.initialTx.chain,
+                                result.initialTx.transactionHash
+                              ) ?? "#"
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline"
+                          >
+                            {result.initialTx.transactionHash}
+                          </a>
+                        ) : (
+                          "—"
+                        )}
                       </div>
                     </div>
                     <div>
@@ -698,7 +730,23 @@ export default function Home() {
                         Transaction Hash
                       </span>
                       <div className="break-all">
-                        {result.executeTx?.transactionHash ?? "—"}
+                        {result.executeTx?.transactionHash ? (
+                          <a
+                            href={
+                              getExplorerTxUrl(
+                                result.executeTx.chain,
+                                result.executeTx.transactionHash
+                              ) ?? "#"
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline"
+                          >
+                            {result.executeTx.transactionHash}
+                          </a>
+                        ) : (
+                          "—"
+                        )}
                       </div>
                     </div>
                     <div>
