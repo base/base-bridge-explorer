@@ -164,7 +164,7 @@ async function lookupBaseDelivery(
   const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
   const client = createPublicClient({
     chain: isMainnet ? base : baseSepolia,
-    transport: http("https://base-sepolia.cbhq.net"),
+    transport: http(),
   });
 
   let transactionHash = "";
@@ -522,9 +522,9 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-6 py-16">
-      <main className="relative w-full max-w-2xl">
-        <header className="mb-10 text-center">
+    <div className="min-h-screen flex items-center justify-center px-8 py-20">
+      <main className="relative w-full max-w-3xl md:max-w-4xl">
+        <header className="mb-12 md:mb-14 text-center">
           <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/60 dark:bg-white/5 px-3 py-1 backdrop-blur-sm">
             <span
               className="h-2 w-2 rounded-full"
@@ -542,21 +542,24 @@ export default function Home() {
           </p>
         </header>
 
-        <form onSubmit={handleSubmit} className="surface rounded-xl p-4 md:p-5">
+        <form
+          onSubmit={handleSubmit}
+          className="surface rounded-xl p-5 md:p-6 lg:p-7"
+        >
           <label
             htmlFor="query"
             className="block text-sm font-medium mb-2 text-[var(--color-muted-foreground)]"
           >
             Transaction identifier
           </label>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 md:gap-4">
             <input
               id="query"
               name="query"
               value={transactionHash}
               onChange={(e) => setTransactionHash(e.target.value)}
               placeholder="e.g. 0x... or 5NTf..."
-              className="w-full h-12 px-4 rounded-md bg-white/70 dark:bg-white/5 outline-none border border-black/10 dark:border-white/10 focus:ring-4 focus:ring-[color:var(--brand)]/30"
+              className="w-full h-12 px-4 rounded-md bg-white/70 dark:bg-white/5 outline-none border border-black/10 dark:border-white/10 shadow-sm focus:ring-4 focus:ring-[color:var(--brand)]/30"
               autoComplete="off"
               spellCheck={false}
               inputMode="text"
@@ -617,26 +620,33 @@ export default function Home() {
           </div>
         </form>
         {result ? (
-          <section className="mt-6 surface rounded-xl p-4 md:p-5">
-            <h2 className="text-lg font-semibold tracking-tight">Result</h2>
+          <section className="mt-8 surface rounded-xl p-5 md:p-6 lg:p-7">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold tracking-tight">Result</h2>
+              {result.status ? (
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${
+                    result.status === BridgeStatus.Executed
+                      ? "bg-green-500/15 text-green-600 dark:text-green-400 ring-green-500/20"
+                      : result.status === BridgeStatus.Validated
+                      ? "bg-blue-500/15 text-blue-600 dark:text-blue-400 ring-blue-500/20"
+                      : "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 ring-yellow-500/20"
+                  }`}
+                >
+                  {result.status}
+                </span>
+              ) : null}
+            </div>
             <div className="mt-2 text-sm text-[var(--color-muted-foreground)]">
               {result.isBridgeRelated
                 ? "This transaction is part of a cross-chain bridge process."
                 : "This transaction is not related to the bridge."}
             </div>
             {result.isBridgeRelated && (
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <div className="text-sm font-medium text-[var(--color-muted-foreground)]">
-                    Status
-                  </div>
-                  <div className="mt-1 text-base">{result.status ?? "—"}</div>
-                </div>
-                <div className="hidden md:block" />
-
-                <div className="col-span-1 md:col-span-1">
-                  <h3 className="text-base font-semibold mt-2">Initial tx</h3>
-                  <div className="mt-2 space-y-1 text-sm">
+              <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
+                <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
+                  <h3 className="text-base font-semibold">Initial tx</h3>
+                  <div className="mt-3 space-y-2 text-sm">
                     <div>
                       <span className="text-[var(--color-muted-foreground)]">
                         Amount transferred
@@ -678,7 +688,7 @@ export default function Home() {
                             }
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="underline"
+                            className="underline hover:underline-offset-2"
                           >
                             {result.initialTx.transactionHash}
                           </a>
@@ -696,9 +706,9 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="col-span-1 md:col-span-1">
-                  <h3 className="text-base font-semibold mt-2">Execute tx</h3>
-                  <div className="mt-2 space-y-1 text-sm">
+                <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
+                  <h3 className="text-base font-semibold">Execute tx</h3>
+                  <div className="mt-3 space-y-2 text-sm">
                     <div>
                       <span className="text-[var(--color-muted-foreground)]">
                         Amount transferred
@@ -740,7 +750,7 @@ export default function Home() {
                             }
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="underline"
+                            className="underline hover:underline-offset-2"
                           >
                             {result.executeTx.transactionHash}
                           </a>
