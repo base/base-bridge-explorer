@@ -19,11 +19,24 @@ import {
   mainnet,
   Signature,
   address,
+  fetchEncodedAccount,
+  MaybeEncodedAccount,
+  ReadonlyUint8Array,
+  Account,
 } from "@solana/kit";
-import { fetchMaybeOutgoingMessage } from "../../clients/ts/src/bridge";
+import {
+  decodeOutgoingMessage,
+  getOutgoingMessageDiscriminatorBytes,
+  getOutputRootDiscriminatorBytes,
+  OutgoingMessage,
+} from "../../clients/ts/src/bridge";
 import { deriveMessageHash } from "@/utils/evm";
 
+// registerOutputRoot: 2YLnnmk3cDJNj8UaCReuLuy8aKXuzBRrtbw8Q7hsB6NwqpM3U4L5DDhpjJWSsTzEosedzSP37bxumuVtSwxcP66u
+
 type InputKind = "solana" | "base" | "unknown";
+
+type ResultKind = "message" | "output_root";
 
 enum BridgeStatus {
   Pending = "pending",
@@ -45,6 +58,7 @@ interface InitialTxDetails {
   senderAddress: string;
   transactionHash: string;
   timestamp: string;
+  isOutputRoot?: boolean;
 }
 
 interface ExecuteTxDetails {
@@ -62,6 +76,7 @@ interface BridgeQueryResult {
   status?: BridgeStatus;
   initialTx?: InitialTxDetails;
   executeTx?: ExecuteTxDetails;
+  kind?: ResultKind;
 }
 
 const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
@@ -87,6 +102,26 @@ const bridgeProgram = {
   [ChainName.Solana]: "",
   [ChainName.SolanaDevnet]: "HSvNvzehozUpYhRBuCKq3Fq8udpRocTmGMUYXmCSiCCc",
 };
+
+function isOutgoingMessage(acct: MaybeEncodedAccount<string>): boolean {
+  return isExpectedAccount(acct, getOutgoingMessageDiscriminatorBytes());
+}
+
+function isOutputRoot(acct: MaybeEncodedAccount<string>): boolean {
+  return isExpectedAccount(acct, getOutputRootDiscriminatorBytes());
+}
+
+function isExpectedAccount(
+  acct: MaybeEncodedAccount<string>,
+  d: ReadonlyUint8Array
+): boolean {
+  return (
+    acct.exists &&
+    acct.data instanceof Uint8Array &&
+    acct.data.length >= d.length &&
+    d.every((byte, i) => acct.data[i] === byte)
+  );
+}
 
 function detectInputKind(value: string): InputKind {
   const v = value.trim();
@@ -356,7 +391,9 @@ async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
 
 async function lookupSolanaInitialTx(
   signature: string
-): Promise<[InitialTxDetails, ExecuteTxDetails | undefined]> {
+): Promise<
+  [InitialTxDetails, ExecuteTxDetails | undefined, ResultKind | undefined]
+> {
   const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
   const devnetUrl = devnet("https://api.devnet.solana.com");
   const mainnetRpc = createSolanaRpc(mainnetUrl);
@@ -372,6 +409,7 @@ async function lookupSolanaInitialTx(
   let asset = "";
   let amount = "0";
   let executeTx;
+  let resultKind: ResultKind | undefined;
 
   if (!transaction) {
     throw new Error("Solana transaction not found");
@@ -414,32 +452,40 @@ async function lookupSolanaInitialTx(
 
       if (info.owner === bridgeProgram[ChainName.SolanaDevnet]) {
         newAccounts.push(info.newAccount);
-        const acct = await fetchMaybeOutgoingMessage(
+        const encodedAcct = await fetchEncodedAccount(
           rpc,
           address(info.newAccount as string)
         );
+        console.log({ encodedAcct });
 
-        console.log({ acct });
-        if (!acct.exists) {
-          continue;
-        }
-        senderAddress = acct.data.sender ?? "";
+        if (isOutgoingMessage(encodedAcct)) {
+          const acct = decodeOutgoingMessage(encodedAcct) as Account<
+            OutgoingMessage,
+            string
+          >;
 
-        if (acct.data.message.__kind === "Transfer") {
-          const msg = acct.data.message.fields[0];
-          amount = msg.amount.toString();
+          console.log({ acct });
+          senderAddress = acct.data.sender ?? "";
 
-          if (msg.localToken === SOL_ADDRESS) {
-            asset = "SOL";
-            amount = String(Number(msg.amount) / 1_000_000_000);
-          } else {
-            // Figure out what localToken is
-            asset = "unknown SPL";
+          if (acct.data.message.__kind === "Transfer") {
+            const msg = acct.data.message.fields[0];
+            amount = msg.amount.toString();
+
+            if (msg.localToken === SOL_ADDRESS) {
+              asset = "SOL";
+              amount = String(Number(msg.amount) / 1_000_000_000);
+            } else {
+              // Figure out what localToken is
+              asset = "unknown SPL";
+            }
           }
-        }
 
-        const msgHash = deriveMessageHash(acct);
-        executeTx = await lookupBaseDelivery(msgHash, isMainnet);
+          const msgHash = deriveMessageHash(acct);
+          executeTx = await lookupBaseDelivery(msgHash, isMainnet);
+          resultKind = "message";
+        } else if (isOutputRoot(encodedAcct)) {
+          resultKind = "output_root";
+        }
       }
     }
   }
@@ -456,6 +502,7 @@ async function lookupSolanaInitialTx(
       ).toString(),
     },
     executeTx,
+    resultKind,
   ];
 }
 
@@ -502,14 +549,20 @@ export default function Home() {
         };
         setResult(r);
       } else {
-        const [initialTx, executeTx] = await lookupSolanaInitialTx(
+        const [initialTx, executeTx, kindFlag] = await lookupSolanaInitialTx(
           transactionHash.trim()
         );
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
           initialTx,
           executeTx,
-          status: executeTx ? BridgeStatus.Executed : BridgeStatus.Pending,
+          kind: kindFlag,
+          status:
+            kindFlag === "output_root"
+              ? undefined
+              : executeTx
+              ? BridgeStatus.Executed
+              : BridgeStatus.Pending,
         };
         setResult(r);
       }
@@ -623,6 +676,11 @@ export default function Home() {
           <section className="mt-8 surface rounded-xl p-5 md:p-6 lg:p-7">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-lg font-semibold tracking-tight">Result</h2>
+              {result.kind === "output_root" ? (
+                <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset bg-purple-500/15 text-purple-600 dark:text-purple-400 ring-purple-500/20">
+                  Output root
+                </span>
+              ) : null}
               {result.status ? (
                 <span
                   className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset ${
@@ -638,11 +696,13 @@ export default function Home() {
               ) : null}
             </div>
             <div className="mt-2 text-sm text-[var(--color-muted-foreground)]">
-              {result.isBridgeRelated
+              {result.kind === "output_root"
+                ? "We recognize this as an output root transaction. It is not tied to a specific cross-chain message."
+                : result.isBridgeRelated
                 ? "This transaction is part of a cross-chain bridge process."
                 : "This transaction is not related to the bridge."}
             </div>
-            {result.isBridgeRelated && (
+            {result.isBridgeRelated && result.kind !== "output_root" && (
               <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
                 <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
                   <h3 className="text-base font-semibold">Initial tx</h3>
