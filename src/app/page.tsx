@@ -14,6 +14,7 @@ import { base, baseSepolia } from "viem/chains";
 import Bridge from "../../abis/Bridge";
 import ERC20 from "../../abis/ERC20";
 import {
+  Address as SolAddress,
   createSolanaRpc,
   devnet,
   mainnet,
@@ -23,16 +24,17 @@ import {
   MaybeEncodedAccount,
   ReadonlyUint8Array,
   Account,
+  getBase58Codec,
 } from "@solana/kit";
 import {
   decodeOutgoingMessage,
+  fetchOutgoingMessage,
   getOutgoingMessageDiscriminatorBytes,
   getOutputRootDiscriminatorBytes,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
 import { deriveMessageHash } from "@/utils/evm";
-
-// registerOutputRoot: 2YLnnmk3cDJNj8UaCReuLuy8aKXuzBRrtbw8Q7hsB6NwqpM3U4L5DDhpjJWSsTzEosedzSP37bxumuVtSwxcP66u
+import BridgeValidator from "../../abis/BridgeValidator";
 
 type InputKind = "solana" | "base" | "unknown";
 
@@ -102,6 +104,15 @@ const bridgeProgram = {
   [ChainName.Solana]: "",
   [ChainName.SolanaDevnet]: "HSvNvzehozUpYhRBuCKq3Fq8udpRocTmGMUYXmCSiCCc",
 };
+
+function bytes32ToPubkey(inp: string): SolAddress {
+  if (inp.startsWith("0x")) {
+    inp = inp.slice(2);
+  }
+  return address(
+    getBase58Codec().decode(Uint8Array.from(Buffer.from(inp, "hex")))
+  );
+}
 
 function isOutgoingMessage(acct: MaybeEncodedAccount<string>): boolean {
   return isExpectedAccount(acct, getOutgoingMessageDiscriminatorBytes());
@@ -239,7 +250,11 @@ async function lookupBaseDelivery(
           const executedTimestamp = block.timestamp;
           timestamp = new Date(Number(executedTimestamp) * 1000).toString();
           transactionHash = executedTransactionHash;
-          return await lookupBaseTxReceipt(executedTransactionHash);
+          const [executeTx] = await lookupBaseTxReceipt(
+            executedTransactionHash,
+            true
+          );
+          return executeTx;
         }
       } else {
         // Check if attempted
@@ -272,7 +287,10 @@ async function lookupBaseDelivery(
   };
 }
 
-async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
+async function lookupBaseTxReceipt(
+  hash: Hash,
+  solanaChecked: boolean
+): Promise<[ExecuteTxDetails, InitialTxDetails | undefined]> {
   const chainId = baseSepolia.id;
   const chainName = ChainName.BaseSepolia;
   const client = createPublicClient({
@@ -292,6 +310,8 @@ async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
   let localToken: Address = zeroAddress;
   let amount = "0";
   let decimals = 18;
+  let pubkey = "0x" as Hex;
+  let initTx = undefined;
   for (let i = 0; i < logs.length; i++) {
     const log = logs[i];
     if (
@@ -308,6 +328,18 @@ async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
       log.topics[0] === MESSAGE_REGISTERED_TOPIC
     ) {
       messageRegistered = true;
+      const decodedData = decodeEventLog({
+        abi: BridgeValidator,
+        data: log.data,
+        topics: log.topics,
+      }) as {
+        eventName: "MessageRegistered";
+        args: {
+          messageHash: `0x${string}`;
+          outgoingMessagePubkey: `0x${string}`;
+        };
+      };
+      pubkey = decodedData.args.outgoingMessagePubkey;
     } else if (
       log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase() &&
       log.topics[0] === TRANSFER_FINALIZED_TOPIC
@@ -378,15 +410,42 @@ async function lookupBaseTxReceipt(hash: Hash): Promise<ExecuteTxDetails> {
     throw new Error("Transaction not recognized");
   }
 
-  return {
-    status: "success",
-    amount: formatUnitsString(amount, decimals),
-    asset,
-    chain: chainName,
-    receiverAddress,
-    transactionHash: hash,
-    timestamp: new Date(Number(block.timestamp) * 1000).toString(),
-  };
+  if (!solanaChecked && pubkey !== "0x") {
+    // Find Solana init transaction
+    [initTx] = await findSolanaInitTx(bytes32ToPubkey(pubkey));
+  }
+
+  return [
+    {
+      status: "success",
+      amount: formatUnitsString(amount, decimals),
+      asset,
+      chain: chainName,
+      receiverAddress,
+      transactionHash: hash,
+      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+    },
+    initTx,
+  ];
+}
+
+async function findSolanaInitTx(pubkey: SolAddress) {
+  const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
+  const devnetUrl = devnet("https://api.devnet.solana.com");
+  const mainnetRpc = createSolanaRpc(mainnetUrl);
+  const devnetRpc = createSolanaRpc(devnetUrl);
+  const isMainnet = false;
+  const rpc = devnetRpc;
+  const outgoingMessage = await fetchOutgoingMessage(rpc, pubkey);
+  console.log({ outgoingMessage });
+  const res = await rpc.getSignaturesForAddress(pubkey).send();
+  console.log({ res });
+  if (res.length !== 1) {
+    throw new Error(
+      "Unexpected transaction signature count for outgoing message"
+    );
+  }
+  return await lookupSolanaInitialTx(res[0].signature);
 }
 
 async function lookupSolanaInitialTx(
@@ -539,11 +598,13 @@ export default function Home() {
     try {
       setIsLoading(true);
       if (kind === "base") {
-        const executeTx = await lookupBaseTxReceipt(
-          transactionHash.trim() as Hash
+        const [executeTx, initialTx] = await lookupBaseTxReceipt(
+          transactionHash.trim() as Hash,
+          false
         );
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
+          initialTx,
           executeTx,
           status: executeTx ? BridgeStatus.Executed : BridgeStatus.Pending,
         };
