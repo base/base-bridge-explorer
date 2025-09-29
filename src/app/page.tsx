@@ -33,7 +33,7 @@ import {
   getOutputRootDiscriminatorBytes,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
-import { deriveMessageHash } from "@/utils/evm";
+import { deriveMessageHash } from "@/lib/evm";
 import BridgeValidator from "../../abis/BridgeValidator";
 
 // TODO: validation tx hash input for Solana -> Base is taking a long time
