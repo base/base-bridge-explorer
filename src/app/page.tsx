@@ -36,6 +36,8 @@ import {
 import { deriveMessageHash } from "@/utils/evm";
 import BridgeValidator from "../../abis/BridgeValidator";
 
+// TODO: validation tx hash input for Solana -> Base is taking a long time
+
 type InputKind = "solana" | "base" | "unknown";
 
 type ResultKind = "message" | "output_root";
@@ -224,12 +226,6 @@ async function lookupBaseDelivery(
   let timestamp = "";
   let status = "";
   let validationTx: ValidationTxDetails | undefined;
-  // Pre-fetch validation (MessageRegistered) details; harmless if absent
-  try {
-    validationTx = await lookupBaseValidationTx(msgHash, isMainnet);
-  } catch (e) {
-    console.warn("lookupBaseValidationTx failed", e);
-  }
 
   const res = await fetch(
     `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
@@ -312,7 +308,7 @@ async function lookupBaseDelivery(
 async function lookupBaseValidationTx(
   msgHash: Hex,
   isMainnet: boolean
-): Promise<ValidationTxDetails | undefined> {
+): Promise<[ValidationTxDetails | undefined, Hex]> {
   const chainId = isMainnet ? base.id : baseSepolia.id;
   const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
   const client = createPublicClient({
@@ -323,17 +319,32 @@ async function lookupBaseValidationTx(
   const res = await fetch(
     `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
   );
-  if (!res.ok) return undefined;
+  if (!res.ok) return [undefined, "0x"];
   const json = await res.json();
   const logs = json.result;
-  if (!Array.isArray(logs) || logs.length === 0) return undefined;
+  if (!Array.isArray(logs) || logs.length === 0) return [undefined, "0x"];
   const [log] = logs;
-  const block = await client.getBlock({ blockHash: log.blockHash });
-  return {
-    chain: chainName,
-    transactionHash: log.transactionHash,
-    timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+  const decodedData = decodeEventLog({
+    abi: BridgeValidator,
+    data: log.data,
+    topics: log.topics,
+  }) as {
+    eventName: "MessageRegistered";
+    args: {
+      messageHash: `0x${string}`;
+      outgoingMessagePubkey: `0x${string}`;
+    };
   };
+  const pubkey = decodedData.args.outgoingMessagePubkey;
+  const block = await client.getBlock({ blockHash: log.blockHash });
+  return [
+    {
+      chain: chainName,
+      transactionHash: log.transactionHash,
+      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+    },
+    pubkey,
+  ];
 }
 
 async function lookupBaseTxReceipt(
@@ -475,16 +486,41 @@ async function lookupBaseTxReceipt(
     throw new Error("Transaction not recognized");
   }
 
+  let validationTx: ValidationTxDetails | undefined = undefined;
+  let executeTx: ExecuteTxDetails | undefined = undefined;
+
+  if (messageSuccessfullyRelayed && !messageRegistered) {
+    if (!messageHash) {
+      throw new Error(
+        "Message hash should be defined if message has been successfully relayed"
+      );
+    }
+    // Look up message registered
+    [validationTx, pubkey] = await lookupBaseValidationTx(
+      messageHash,
+      (chainId as any) === base.id
+    );
+  } else if (messageRegistered && !messageSuccessfullyRelayed) {
+    if (!messageHash) {
+      throw new Error(
+        "Message hash should be defined if message has been registered"
+      );
+    }
+
+    // Look up execute tx
+    [executeTx] = await lookupBaseDelivery(
+      messageHash,
+      (chainId as any) === base.id
+    );
+  }
+
   if (!solanaChecked && pubkey !== "0x") {
     // Find Solana init transaction
     [initTx] = await findSolanaInitTx(bytes32ToPubkey(pubkey));
   }
 
-  let validationTx: ValidationTxDetails | undefined = undefined;
-  let executeTx: ExecuteTxDetails | undefined = undefined;
-
   // If this is an execute tx, populate execute details
-  if (transferFinalized || messageSuccessfullyRelayed) {
+  if ((transferFinalized || messageSuccessfullyRelayed) && !executeTx) {
     executeTx = {
       status: "success",
       amount: formatUnitsString(amount, decimals),
@@ -494,27 +530,14 @@ async function lookupBaseTxReceipt(
       transactionHash: hash,
       timestamp: new Date(Number(block.timestamp) * 1000).toString(),
     };
-    // If we have the message hash, look up the corresponding validation tx
-    if (messageHash) {
-      validationTx = await lookupBaseValidationTx(messageHash, false);
-    }
-  } else if (isValidationTx) {
+  }
+  if (isValidationTx && !validationTx) {
     // This tx is a validation (MessageRegistered) tx
     validationTx = {
       chain: chainName,
       transactionHash: hash,
       timestamp: new Date(Number(block.timestamp) * 1000).toString(),
     };
-    // Try to discover an execute tx via the message hash
-    if (messageHash) {
-      const [deliveredTx] = await lookupBaseDelivery(messageHash, false);
-      if (deliveredTx && deliveredTx.transactionHash) {
-        executeTx = deliveredTx;
-      }
-    }
-  } else if (messageHash) {
-    // Fallback: if we saw a message hash but not an execute event in this tx, fetch validation details
-    validationTx = await lookupBaseValidationTx(messageHash, false);
   }
 
   return [executeTx, initTx, validationTx];
