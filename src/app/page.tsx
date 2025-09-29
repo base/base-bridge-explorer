@@ -341,7 +341,7 @@ async function lookupBaseTxReceipt(
   solanaChecked: boolean
 ): Promise<
   [
-    ExecuteTxDetails,
+    ExecuteTxDetails | undefined,
     InitialTxDetails | undefined,
     ValidationTxDetails | undefined
   ]
@@ -367,6 +367,7 @@ async function lookupBaseTxReceipt(
   let amount = "0";
   let decimals = 18;
   let pubkey = "0x" as Hex;
+  let isValidationTx = false;
   let initTx = undefined;
   for (let i = 0; i < logs.length; i++) {
     const log = logs[i];
@@ -396,6 +397,9 @@ async function lookupBaseTxReceipt(
         };
       };
       pubkey = decodedData.args.outgoingMessagePubkey;
+      // Capture message hash from validation event as well
+      messageHash = decodedData.args.messageHash as Hex;
+      isValidationTx = true;
     } else if (
       log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase() &&
       log.topics[0] === TRANSFER_FINALIZED_TOPIC
@@ -450,12 +454,14 @@ async function lookupBaseTxReceipt(
 
   const [block, multicallResults] = await Promise.all(calls);
 
-  const [assetRes, decimalsRes] = multicallResults;
-  if (assetRes.status === "success") {
-    asset = assetRes.result;
-  }
-  if (decimalsRes.status === "success") {
-    decimals = decimalsRes.result;
+  if (multicallResults) {
+    const [assetRes, decimalsRes] = multicallResults;
+    if (assetRes.status === "success") {
+      asset = assetRes.result;
+    }
+    if (decimalsRes.status === "success") {
+      decimals = decimalsRes.result;
+    }
   }
 
   console.log({
@@ -475,13 +481,11 @@ async function lookupBaseTxReceipt(
   }
 
   let validationTx: ValidationTxDetails | undefined = undefined;
+  let executeTx: ExecuteTxDetails | undefined = undefined;
 
-  if (messageHash) {
-    validationTx = await lookupBaseValidationTx(messageHash, false);
-  }
-
-  return [
-    {
+  // If this is an execute tx, populate execute details
+  if (transferFinalized || messageSuccessfullyRelayed) {
+    executeTx = {
       status: "success",
       amount: formatUnitsString(amount, decimals),
       asset,
@@ -489,10 +493,31 @@ async function lookupBaseTxReceipt(
       receiverAddress,
       transactionHash: hash,
       timestamp: new Date(Number(block.timestamp) * 1000).toString(),
-    },
-    initTx,
-    validationTx,
-  ];
+    };
+    // If we have the message hash, look up the corresponding validation tx
+    if (messageHash) {
+      validationTx = await lookupBaseValidationTx(messageHash, false);
+    }
+  } else if (isValidationTx) {
+    // This tx is a validation (MessageRegistered) tx
+    validationTx = {
+      chain: chainName,
+      transactionHash: hash,
+      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+    };
+    // Try to discover an execute tx via the message hash
+    if (messageHash) {
+      const [deliveredTx] = await lookupBaseDelivery(messageHash, false);
+      if (deliveredTx && deliveredTx.transactionHash) {
+        executeTx = deliveredTx;
+      }
+    }
+  } else if (messageHash) {
+    // Fallback: if we saw a message hash but not an execute event in this tx, fetch validation details
+    validationTx = await lookupBaseValidationTx(messageHash, false);
+  }
+
+  return [executeTx, initTx, validationTx];
 }
 
 async function findSolanaInitTx(pubkey: SolAddress) {
