@@ -73,11 +73,18 @@ interface ExecuteTxDetails {
   timestamp: string;
 }
 
+interface ValidationTxDetails {
+  chain: ChainName;
+  transactionHash: string;
+  timestamp: string;
+}
+
 interface BridgeQueryResult {
   isBridgeRelated: boolean;
   status?: BridgeStatus;
   initialTx?: InitialTxDetails;
   executeTx?: ExecuteTxDetails;
+  validationTx?: ValidationTxDetails;
   kind?: ResultKind;
 }
 
@@ -203,7 +210,7 @@ function formatUnitsString(
 async function lookupBaseDelivery(
   msgHash: Hex,
   isMainnet: boolean
-): Promise<ExecuteTxDetails> {
+): Promise<[ExecuteTxDetails | undefined, ValidationTxDetails | undefined]> {
   console.log({ msgHash });
 
   const chainId = isMainnet ? base.id : baseSepolia.id;
@@ -216,6 +223,13 @@ async function lookupBaseDelivery(
   let transactionHash = "";
   let timestamp = "";
   let status = "";
+  let validationTx: ValidationTxDetails | undefined;
+  // Pre-fetch validation (MessageRegistered) details; harmless if absent
+  try {
+    validationTx = await lookupBaseValidationTx(msgHash, isMainnet);
+  } catch (e) {
+    console.warn("lookupBaseValidationTx failed", e);
+  }
 
   const res = await fetch(
     `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
@@ -232,6 +246,11 @@ async function lookupBaseDelivery(
       const block = await client.getBlock({ blockHash: prevalidatedBlockHash });
       const prevalidatedTimestamp = block.timestamp;
       console.log({ prevalidatedTransactionHash, prevalidatedTimestamp });
+      validationTx = {
+        chain: chainName,
+        transactionHash: prevalidatedTransactionHash,
+        timestamp: new Date(Number(prevalidatedTimestamp) * 1000).toString(),
+      };
 
       const res = await fetch(
         `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_SUCCESSFULLY_RELAYED_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
@@ -254,7 +273,7 @@ async function lookupBaseDelivery(
             executedTransactionHash,
             true
           );
-          return executeTx;
+          return [executeTx, validationTx];
         }
       } else {
         // Check if attempted
@@ -276,21 +295,57 @@ async function lookupBaseDelivery(
     }
   }
 
+  return [
+    {
+      status,
+      amount: "0",
+      asset: "",
+      chain: chainName,
+      receiverAddress: "",
+      transactionHash,
+      timestamp,
+    },
+    validationTx,
+  ];
+}
+
+async function lookupBaseValidationTx(
+  msgHash: Hex,
+  isMainnet: boolean
+): Promise<ValidationTxDetails | undefined> {
+  const chainId = isMainnet ? base.id : baseSepolia.id;
+  const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
+  const client = createPublicClient({
+    chain: isMainnet ? base : baseSepolia,
+    transport: http(),
+  });
+
+  const res = await fetch(
+    `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
+  );
+  if (!res.ok) return undefined;
+  const json = await res.json();
+  const logs = json.result;
+  if (!Array.isArray(logs) || logs.length === 0) return undefined;
+  const [log] = logs;
+  const block = await client.getBlock({ blockHash: log.blockHash });
   return {
-    status,
-    amount: "0",
-    asset: "",
     chain: chainName,
-    receiverAddress: "",
-    transactionHash,
-    timestamp,
+    transactionHash: log.transactionHash,
+    timestamp: new Date(Number(block.timestamp) * 1000).toString(),
   };
 }
 
 async function lookupBaseTxReceipt(
   hash: Hash,
   solanaChecked: boolean
-): Promise<[ExecuteTxDetails, InitialTxDetails | undefined]> {
+): Promise<
+  [
+    ExecuteTxDetails,
+    InitialTxDetails | undefined,
+    ValidationTxDetails | undefined
+  ]
+> {
   const chainId = baseSepolia.id;
   const chainName = ChainName.BaseSepolia;
   const client = createPublicClient({
@@ -305,6 +360,7 @@ async function lookupBaseTxReceipt(
   let messageSuccessfullyRelayed = false;
   let transferFinalized = false;
   let bridgeSeen = false;
+  let messageHash: Hex | undefined = undefined;
   let receiverAddress = "";
   let asset = "";
   let localToken: Address = zeroAddress;
@@ -366,6 +422,9 @@ async function lookupBaseTxReceipt(
       log.topics[0] === MESSAGE_SUCCESSFULLY_RELAYED_TOPIC
     ) {
       messageSuccessfullyRelayed = true;
+      if (log.topics.length > 2) {
+        messageHash = log.topics[2] as Hex;
+      }
     }
   }
 
@@ -415,6 +474,12 @@ async function lookupBaseTxReceipt(
     [initTx] = await findSolanaInitTx(bytes32ToPubkey(pubkey));
   }
 
+  let validationTx: ValidationTxDetails | undefined = undefined;
+
+  if (messageHash) {
+    validationTx = await lookupBaseValidationTx(messageHash, false);
+  }
+
   return [
     {
       status: "success",
@@ -426,6 +491,7 @@ async function lookupBaseTxReceipt(
       timestamp: new Date(Number(block.timestamp) * 1000).toString(),
     },
     initTx,
+    validationTx,
   ];
 }
 
@@ -451,7 +517,12 @@ async function findSolanaInitTx(pubkey: SolAddress) {
 async function lookupSolanaInitialTx(
   signature: string
 ): Promise<
-  [InitialTxDetails, ExecuteTxDetails | undefined, ResultKind | undefined]
+  [
+    InitialTxDetails,
+    ExecuteTxDetails | undefined,
+    ResultKind | undefined,
+    ValidationTxDetails | undefined
+  ]
 > {
   const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
   const devnetUrl = devnet("https://api.devnet.solana.com");
@@ -460,14 +531,18 @@ async function lookupSolanaInitialTx(
   const isMainnet = false;
   const rpc = devnetRpc;
   const transaction = await rpc
-    .getTransaction(signature as Signature, { encoding: "jsonParsed" })
+    .getTransaction(signature as Signature, {
+      encoding: "jsonParsed",
+      maxSupportedTransactionVersion: 0,
+    })
     .send();
   console.log({ transaction });
 
   let senderAddress = "";
   let asset = "";
   let amount = "0";
-  let executeTx;
+  let executeTx: ExecuteTxDetails | undefined;
+  let validationTx: ValidationTxDetails | undefined;
   let resultKind: ResultKind | undefined;
 
   if (!transaction) {
@@ -540,7 +615,12 @@ async function lookupSolanaInitialTx(
           }
 
           const msgHash = deriveMessageHash(acct);
-          executeTx = await lookupBaseDelivery(msgHash, isMainnet);
+          const [deliveredTx, vTx] = await lookupBaseDelivery(
+            msgHash,
+            isMainnet
+          );
+          executeTx = deliveredTx;
+          validationTx = vTx;
           resultKind = "message";
         } else if (isOutputRoot(encodedAcct)) {
           resultKind = "output_root";
@@ -562,6 +642,7 @@ async function lookupSolanaInitialTx(
     },
     executeTx,
     resultKind,
+    validationTx,
   ];
 }
 
@@ -598,7 +679,7 @@ export default function Home() {
     try {
       setIsLoading(true);
       if (kind === "base") {
-        const [executeTx, initialTx] = await lookupBaseTxReceipt(
+        const [executeTx, initialTx, validationTx] = await lookupBaseTxReceipt(
           transactionHash.trim() as Hash,
           false
         );
@@ -606,23 +687,30 @@ export default function Home() {
           isBridgeRelated: true,
           initialTx,
           executeTx,
-          status: executeTx ? BridgeStatus.Executed : BridgeStatus.Pending,
+          validationTx,
+          status: executeTx
+            ? BridgeStatus.Executed
+            : validationTx
+            ? BridgeStatus.Validated
+            : BridgeStatus.Pending,
         };
         setResult(r);
       } else {
-        const [initialTx, executeTx, kindFlag] = await lookupSolanaInitialTx(
-          transactionHash.trim()
-        );
+        const [initialTx, executeTx, kindFlag, validationTx] =
+          await lookupSolanaInitialTx(transactionHash.trim());
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
           initialTx,
           executeTx,
           kind: kindFlag,
+          validationTx,
           status:
             kindFlag === "output_root"
               ? undefined
               : executeTx
               ? BridgeStatus.Executed
+              : validationTx
+              ? BridgeStatus.Validated
               : BridgeStatus.Pending,
         };
         setResult(r);
@@ -823,6 +911,50 @@ export default function Home() {
                         Timestamp
                       </span>
                       <div>{result.initialTx?.timestamp ?? "—"}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
+                  <h3 className="text-base font-semibold">
+                    Message validation
+                  </h3>
+                  <div className="mt-3 space-y-2 text-sm">
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Chain
+                      </span>
+                      <div>{result.validationTx?.chain ?? "—"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Transaction Hash
+                      </span>
+                      <div className="break-all">
+                        {result.validationTx?.transactionHash ? (
+                          <a
+                            href={
+                              getExplorerTxUrl(
+                                result.validationTx.chain,
+                                result.validationTx.transactionHash
+                              ) ?? "#"
+                            }
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline hover:underline-offset-2"
+                          >
+                            {result.validationTx.transactionHash}
+                          </a>
+                        ) : (
+                          "—"
+                        )}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--color-muted-foreground)]">
+                        Timestamp
+                      </span>
+                      <div>{result.validationTx?.timestamp ?? "—"}</div>
                     </div>
                   </div>
                 </div>
