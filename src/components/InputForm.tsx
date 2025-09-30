@@ -6,6 +6,7 @@ import { BaseMessageDecoder } from "@/lib/base";
 import { SolanaMessageDecoder } from "@/lib/solana";
 import { Hash } from "viem";
 import { BridgeQueryResult, BridgeStatus } from "@/lib/bridge";
+import { ChainName } from "@/lib/transaction";
 
 export type InputKind = "solana" | "base" | "unknown";
 
@@ -81,14 +82,20 @@ export const InputForm = ({
       } else {
         const { initTx, kind, msgHash } =
           await solanaDecoder.lookupSolanaInitialTx(transactionHash.trim());
-        let executeTx, validationTx;
+        const {
+          validationTxDetails: validationTx,
+          executeTxDetails: executeTx,
+        } = await baseDecoder.getBaseMessageInfoFromMsgHash(
+          msgHash,
+          initTx.chain === ChainName.Solana
+        );
 
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
           initialTx: initTx,
-          // executeTx,
+          validationTx,
+          executeTx,
           kind,
-          // validationTx,
           status:
             kind === "output_root"
               ? undefined

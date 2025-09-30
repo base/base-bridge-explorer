@@ -77,6 +77,26 @@ export class BaseMessageDecoder {
   });
   private recognizedChainId: number = 0;
 
+  async getBaseMessageInfoFromMsgHash(
+    msgHash: Hash,
+    isMainnet: boolean
+  ): Promise<{
+    validationTxDetails: ValidationTxDetails;
+    executeTxDetails: ExecuteTxDetails;
+  }> {
+    this.recognizedChainId = isMainnet ? base.id : baseSepolia.id;
+
+    const { validationTx } = await this.getValidationTxFromMsgHash(
+      msgHash,
+      isMainnet
+    );
+    const executionTx = await this.getExecutionTxFromMsgHash(
+      msgHash,
+      isMainnet
+    );
+    return { validationTxDetails: validationTx, executeTxDetails: executionTx };
+  }
+
   async getBaseMessageInfoFromTransactionHash(hash: Hash): Promise<{
     validationTxDetails: ValidationTxDetails;
     executeTxDetails: ExecuteTxDetails;
@@ -161,7 +181,7 @@ export class BaseMessageDecoder {
     return { validationTx, executeTx, receipt, client };
   }
 
-  async getValidationTxFromMsgHash(
+  private async getValidationTxFromMsgHash(
     msgHash: Hex,
     isMainnet: boolean
   ): Promise<{ validationTx: ValidationTxDetails; pubkey: Hex }> {
