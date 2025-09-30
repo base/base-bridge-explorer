@@ -6,6 +6,7 @@ import {
   devnet,
   fetchEncodedAccount,
   getBase58Codec,
+  getProgramDerivedAddress,
   mainnet,
   MaybeEncodedAccount,
   ReadonlyUint8Array,
@@ -17,6 +18,7 @@ import {
 } from "@solana/kit";
 import {
   decodeOutgoingMessage,
+  fetchIncomingMessage,
   fetchOutgoingMessage,
   getOutgoingMessageDiscriminatorBytes,
   getOutputRootDiscriminatorBytes,
@@ -24,9 +26,7 @@ import {
 } from "../../clients/ts/src/bridge";
 import { ChainName, InitialTxDetails } from "./transaction";
 import { deriveMessageHash } from "./evm";
-import { Hex } from "viem";
-
-// HERE: in progress refactoring the transaction lookups to be cleaner and more efficient. We have a first pass on Solana done that needs to be wired into page.tsx
+import { Hex, toBytes } from "viem";
 
 export enum ResultKind {
   Message = "message",
@@ -74,6 +74,22 @@ export class SolanaMessageDecoder {
       );
     }
     return await this.lookupSolanaInitialTx(res[0].signature);
+  }
+
+  async findSolanaDeliveryFromMsgHash(msgHash: Hex, isMainnet: boolean) {
+    const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
+    const [messageAddress] = await getProgramDerivedAddress({
+      programAddress: address(
+        bridgeProgram[isMainnet ? ChainName.Solana : ChainName.SolanaDevnet]
+      ),
+      seeds: [Buffer.from("incoming_message"), toBytes(msgHash)],
+    });
+    try {
+      const incomingMessage = await fetchIncomingMessage(rpc, messageAddress);
+      console.log({ incomingMessage });
+    } catch {
+      return;
+    }
   }
 
   async lookupSolanaInitialTx(

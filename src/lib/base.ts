@@ -109,6 +109,7 @@ export class BaseMessageDecoder {
     validationTxDetails?: ValidationTxDetails;
     executeTxDetails?: ExecuteTxDetails;
     pubkey?: Hex;
+    msgHash?: Hex;
   }> {
     // If this returns without erroring, we know the tx is part of a bridge interaction
     const { validationTx, executeTx, messageInit, receipt, client } =
@@ -126,7 +127,7 @@ export class BaseMessageDecoder {
       }
       // Only need init details
       const initTx = await this.getInitTxFromReceipt(receipt, isMainnet);
-      return { initTxDetails: initTx };
+      return { initTxDetails: initTx, msgHash };
     }
 
     let validationTxDetails: ValidationTxDetails;
@@ -166,7 +167,7 @@ export class BaseMessageDecoder {
       );
     }
 
-    return { validationTxDetails, executeTxDetails, pubkey };
+    return { validationTxDetails, executeTxDetails, pubkey, msgHash };
   }
 
   private async getInitTxFromReceipt(

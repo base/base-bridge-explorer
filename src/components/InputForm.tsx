@@ -62,10 +62,15 @@ export const InputForm = ({
     try {
       setIsLoading(true);
       if (kind === "base") {
-        const { initTxDetails, validationTxDetails, executeTxDetails, pubkey } =
-          await baseDecoder.getBaseMessageInfoFromTransactionHash(
-            transactionHash.trim() as Hash
-          );
+        const {
+          initTxDetails,
+          validationTxDetails,
+          executeTxDetails,
+          pubkey,
+          msgHash,
+        } = await baseDecoder.getBaseMessageInfoFromTransactionHash(
+          transactionHash.trim() as Hash
+        );
 
         let initialTx: InitialTxDetails;
         if (!initTxDetails && pubkey) {
@@ -75,6 +80,14 @@ export const InputForm = ({
           initialTx = initTxDetails;
         } else {
           throw new Error("Initial tx details not found");
+        }
+
+        if (initTxDetails && msgHash) {
+          // Find Solana delivery
+          const isMainnet = initTxDetails.chain === ChainName.Base;
+          await solanaDecoder.findSolanaDeliveryFromMsgHash(msgHash, isMainnet);
+        } else {
+          throw new Error("Unable to find Solana delivery");
         }
 
         const r: BridgeQueryResult = {
