@@ -1,7 +1,9 @@
 import {
   Address,
+  Block,
   createPublicClient,
   decodeEventLog,
+  ethAddress,
   Hash,
   Hex,
   http,
@@ -15,6 +17,7 @@ import ERC20 from "../../abis/ERC20";
 import {
   ChainName,
   ExecuteTxDetails,
+  InitialTxDetails,
   ValidationTxDetails,
 } from "./transaction";
 
@@ -30,10 +33,14 @@ const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
   "0x68bfb2e57fcbb47277da442d81d3e40ff118cbbcaf345b07997b35f592359e49";
 const FAILED_TO_RELAY_MESSAGE_TOPIC =
   "0x1dc47a66003d9a2334f04c3d23d98f174d7e65e9a4a72fa13277a15120c1559e";
+const TRANSFER_INITIALIZED_TOPIC =
+  "0xf1109ae3af61805fa998753209b2a90166bfc4b38ad8a6b5a268591ce18f99c0";
 const TRANSFER_FINALIZED_TOPIC =
   "0x6899b9db6ebabd932aa1fc835134c9b9ca2168d78a4cbee8854b1c00c8647609";
 const MESSAGE_REGISTERED_TOPIC =
   "0x5e55930eb861ee57d9b7fa9e506b7f413cb1599c9886e57f1c8091f5fee5fc33";
+const MESSAGE_INITIATED_TOPIC =
+  "0xbaa7ef9db66a2e95a218100288cf439de5fbe1e4ed665cd1a2f01278242c9fc4";
 
 // Formats a big integer value given its token decimals into a human-friendly string
 function formatUnitsString(
@@ -98,16 +105,29 @@ export class BaseMessageDecoder {
   }
 
   async getBaseMessageInfoFromTransactionHash(hash: Hash): Promise<{
-    validationTxDetails: ValidationTxDetails;
-    executeTxDetails: ExecuteTxDetails;
-    pubkey: Hex;
+    initTxDetails?: InitialTxDetails;
+    validationTxDetails?: ValidationTxDetails;
+    executeTxDetails?: ExecuteTxDetails;
+    pubkey?: Hex;
   }> {
     // If this returns without erroring, we know the tx is part of a bridge interaction
-    const { validationTx, executeTx, receipt, client } =
+    const { validationTx, executeTx, messageInit, receipt, client } =
       await this.identifyBaseTx(hash);
 
     const msgHash = this.extractMsgHashFromReceipt(receipt);
     const isMainnet = (client.chain.id as number) === base.id;
+
+    if (messageInit) {
+      if (validationTx) {
+        throw new Error("Base transaction is both init and validation");
+      }
+      if (executeTx) {
+        throw new Error("Base transaction is both init and execution");
+      }
+      // Only need init details
+      const initTx = await this.getInitTxFromReceipt(receipt, isMainnet);
+      return { initTxDetails: initTx };
+    }
 
     let validationTxDetails: ValidationTxDetails;
     let executeTxDetails: ExecuteTxDetails;
@@ -149,6 +169,87 @@ export class BaseMessageDecoder {
     return { validationTxDetails, executeTxDetails, pubkey };
   }
 
+  private async getInitTxFromReceipt(
+    receipt: TransactionReceipt,
+    isMainnet: boolean
+  ): Promise<InitialTxDetails> {
+    const client = isMainnet ? this.baseClient : this.baseSepoliaClient;
+
+    const { logs } = receipt;
+
+    let senderAddress = receipt.from;
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+
+      if (this.isTransferInitLog(log)) {
+        const decodedData = decodeEventLog({
+          abi: Bridge,
+          data: log.data,
+          topics: log.topics,
+        }) as {
+          eventName: "TransferInitialized";
+          args: {
+            localToken: Address;
+            remoteToken: Hex;
+            to: Hex;
+            amount: bigint;
+          };
+        };
+
+        const amount = String(decodedData.args.amount);
+        const localToken = decodedData.args.localToken;
+
+        let block: Block;
+        let asset = "";
+        let decimals = 18;
+
+        if (localToken.toLowerCase() === ethAddress.toLowerCase()) {
+          asset = "ETH";
+          block = await client.getBlock({ blockHash: receipt.blockHash });
+        } else {
+          const calls: any = [
+            client.getBlock({ blockHash: receipt.blockHash }),
+            client.multicall({
+              contracts: [
+                {
+                  address: localToken,
+                  abi: ERC20,
+                  functionName: "symbol",
+                },
+                {
+                  address: localToken,
+                  abi: ERC20,
+                  functionName: "decimals",
+                },
+              ],
+            }),
+          ];
+          const [blockRes, multicallResults] = await Promise.all(calls);
+          block = blockRes;
+          const [assetRes, decimalsRes] = multicallResults;
+          if (assetRes.status === "success") {
+            asset = assetRes.result;
+          }
+          if (decimalsRes.status === "success") {
+            decimals = decimalsRes.result;
+          }
+        }
+
+        return {
+          amount: formatUnitsString(amount, decimals),
+          asset,
+          chain: client.chain.name as ChainName,
+          senderAddress,
+          transactionHash: receipt.transactionHash,
+          timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+        };
+      }
+    }
+
+    throw new Error("Init tx info not found in receipt");
+  }
+
   private async identifyBaseTx(hash: Hash) {
     const client = this.baseSepoliaClient;
     this.recognizedChainId = client.chain.id;
@@ -159,6 +260,7 @@ export class BaseMessageDecoder {
     let bridgeSeen = false;
     let validationTx = false;
     let executeTx = false;
+    let messageInit = false;
 
     for (let i = 0; i < logs.length; i++) {
       const log = logs[i];
@@ -171,6 +273,8 @@ export class BaseMessageDecoder {
         validationTx = true;
       } else if (this.isExecutionLog(log)) {
         executeTx = true;
+      } else if (this.isMessageInitLog(log)) {
+        messageInit = true;
       }
     }
 
@@ -178,7 +282,7 @@ export class BaseMessageDecoder {
       throw new Error("Transaction not recognized");
     }
 
-    return { validationTx, executeTx, receipt, client };
+    return { validationTx, executeTx, messageInit, receipt, client };
   }
 
   private async getValidationTxFromMsgHash(
@@ -384,11 +488,27 @@ export class BaseMessageDecoder {
     );
   }
 
+  private isTransferInitLog(log: Log): boolean {
+    return (
+      log.address.toLowerCase() ===
+        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      log.topics[0] === TRANSFER_INITIALIZED_TOPIC
+    );
+  }
+
   private isTransferExecutionLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
         bridgeAddress[this.recognizedChainId].toLowerCase() &&
       log.topics[0] === TRANSFER_FINALIZED_TOPIC
+    );
+  }
+
+  private isMessageInitLog(log: Log): boolean {
+    return (
+      log.address.toLowerCase() ===
+        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      log.topics[0] === MESSAGE_INITIATED_TOPIC
     );
   }
 
@@ -410,11 +530,14 @@ export class BaseMessageDecoder {
             outgoingMessagePubkey: `0x${string}`;
           };
         };
-        // pubkey = decodedData.args.outgoingMessagePubkey;
         return decodedData.args.messageHash as Hex;
       } else if (this.isExecutionLog(log)) {
         if (log.topics.length > 2) {
           return log.topics[2] as Hex;
+        }
+      } else if (this.isMessageInitLog(log)) {
+        if (log.topics.length > 1) {
+          return log.topics[1] as Hex;
         }
       }
     }
@@ -430,11 +553,6 @@ export class BaseMessageDecoder {
 
       if (this.isValidationLog(log)) {
         return this.extractPubkeyFromLog(log);
-      } else if (this.isExecutionLog(log)) {
-        // TODO: I don't think this is right
-        if (log.topics.length > 2) {
-          return log.topics[2] as Hex;
-        }
       }
     }
 

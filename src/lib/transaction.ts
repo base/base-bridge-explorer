@@ -12,7 +12,6 @@ export interface InitialTxDetails {
   senderAddress: string;
   transactionHash: string;
   timestamp: string;
-  isOutputRoot?: boolean;
 }
 
 export interface ExecuteTxDetails {

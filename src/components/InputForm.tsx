@@ -6,7 +6,7 @@ import { BaseMessageDecoder } from "@/lib/base";
 import { SolanaMessageDecoder } from "@/lib/solana";
 import { Hash } from "viem";
 import { BridgeQueryResult, BridgeStatus } from "@/lib/bridge";
-import { ChainName } from "@/lib/transaction";
+import { ChainName, InitialTxDetails } from "@/lib/transaction";
 
 export type InputKind = "solana" | "base" | "unknown";
 
@@ -62,14 +62,24 @@ export const InputForm = ({
     try {
       setIsLoading(true);
       if (kind === "base") {
-        const { validationTxDetails, executeTxDetails, pubkey } =
+        const { initTxDetails, validationTxDetails, executeTxDetails, pubkey } =
           await baseDecoder.getBaseMessageInfoFromTransactionHash(
             transactionHash.trim() as Hash
           );
-        const { initTx } = await solanaDecoder.findSolanaInitTx(pubkey);
+
+        let initialTx: InitialTxDetails;
+        if (!initTxDetails && pubkey) {
+          const { initTx } = await solanaDecoder.findSolanaInitTx(pubkey);
+          initialTx = initTx;
+        } else if (initTxDetails) {
+          initialTx = initTxDetails;
+        } else {
+          throw new Error("Initial tx details not found");
+        }
+
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
-          initialTx: initTx,
+          initialTx,
           executeTx: executeTxDetails,
           validationTx: validationTxDetails,
           status: executeTxDetails
