@@ -1,0 +1,438 @@
+import {
+  Address,
+  createPublicClient,
+  decodeEventLog,
+  Hash,
+  Hex,
+  http,
+  Log,
+  TransactionReceipt,
+} from "viem";
+import { base, baseSepolia } from "viem/chains";
+import BridgeValidator from "../../abis/BridgeValidator";
+import Bridge from "../../abis/Bridge";
+import ERC20 from "../../abis/ERC20";
+import {
+  ChainName,
+  ExecuteTxDetails,
+  ValidationTxDetails,
+} from "./transaction";
+
+const bridgeAddress: Record<number, Address> = {
+  8453: "0x", // Base Mainnet
+  84532: "0xB2068ECCDb908902C76E3f965c1712a9cF64171E", // Base Sepolia
+};
+const bridgeValidatorAddress: Record<number, Address> = {
+  8453: "0x", // Base Mainnet
+  84532: "0x8D2cD165360ACF5f0145661a8FB0Ff5D3729Ef9A", // Base Sepolia
+};
+const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
+  "0x68bfb2e57fcbb47277da442d81d3e40ff118cbbcaf345b07997b35f592359e49";
+const FAILED_TO_RELAY_MESSAGE_TOPIC =
+  "0x1dc47a66003d9a2334f04c3d23d98f174d7e65e9a4a72fa13277a15120c1559e";
+const TRANSFER_FINALIZED_TOPIC =
+  "0x6899b9db6ebabd932aa1fc835134c9b9ca2168d78a4cbee8854b1c00c8647609";
+const MESSAGE_REGISTERED_TOPIC =
+  "0x5e55930eb861ee57d9b7fa9e506b7f413cb1599c9886e57f1c8091f5fee5fc33";
+
+// Formats a big integer value given its token decimals into a human-friendly string
+function formatUnitsString(
+  value: string,
+  decimals: number,
+  maxFractionDigits = 6
+): string {
+  const isNegative = value.startsWith("-");
+  const digits = isNegative ? value.slice(1) : value;
+  const trimmed = digits.replace(/^0+/, "") || "0";
+
+  if (decimals === 0) {
+    return (isNegative ? "-" : "") + trimmed;
+  }
+
+  const padded = trimmed.padStart(decimals + 1, "0");
+  const integerPart = padded.slice(0, padded.length - decimals);
+  let fractionPart = padded.slice(padded.length - decimals);
+
+  // Trim trailing zeros, then clamp to maxFractionDigits
+  fractionPart = fractionPart.replace(/0+$/, "");
+  if (fractionPart.length > maxFractionDigits) {
+    fractionPart = fractionPart.slice(0, maxFractionDigits);
+  }
+
+  return (
+    (isNegative ? "-" : "") +
+    integerPart +
+    (fractionPart ? `.${fractionPart}` : "")
+  );
+}
+
+export class BaseMessageDecoder {
+  private baseClient = createPublicClient({
+    chain: base,
+    transport: http(),
+  });
+  private baseSepoliaClient = createPublicClient({
+    chain: baseSepolia,
+    transport: http(),
+  });
+  private recognizedChainId: number = 0;
+
+  async getBaseMessageInfoFromTransactionHash(hash: Hash): Promise<{
+    validationTxDetails: ValidationTxDetails;
+    executeTxDetails: ExecuteTxDetails;
+    pubkey: Hex;
+  }> {
+    // If this returns without erroring, we know the tx is part of a bridge interaction
+    const { validationTx, executeTx, receipt, client } =
+      await this.identifyBaseTx(hash);
+
+    const msgHash = this.extractMsgHashFromReceipt(receipt);
+    const isMainnet = (client.chain.id as number) === base.id;
+
+    let validationTxDetails: ValidationTxDetails;
+    let executeTxDetails: ExecuteTxDetails;
+    let pubkey: Hash;
+
+    if (validationTx) {
+      // Get validationTx info from receipt
+      const block = await client.getBlock({ blockHash: receipt.blockHash });
+      pubkey = this.extractPubkeyFromReceipt(receipt);
+      validationTxDetails = {
+        chain: client.chain.name as ChainName,
+        transactionHash: hash,
+        timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+      };
+    } else {
+      // Get validationTx info from msgHash
+      const { validationTx, pubkey: p } = await this.getValidationTxFromMsgHash(
+        msgHash,
+        isMainnet
+      );
+      validationTxDetails = validationTx;
+      pubkey = p;
+    }
+
+    if (executeTx) {
+      // Get executeTx info from receipt
+      executeTxDetails = await this.getExecutionTxFromReceipt(
+        receipt,
+        isMainnet
+      );
+    } else {
+      // Get executeTx info from msgHash
+      executeTxDetails = await this.getExecutionTxFromMsgHash(
+        msgHash,
+        isMainnet
+      );
+    }
+
+    return { validationTxDetails, executeTxDetails, pubkey };
+  }
+
+  private async identifyBaseTx(hash: Hash) {
+    const client = this.baseSepoliaClient;
+    this.recognizedChainId = client.chain.id;
+    const receipt = await client.getTransactionReceipt({ hash });
+    console.log({ receipt });
+    const { logs } = receipt;
+
+    let bridgeSeen = false;
+    let validationTx = false;
+    let executeTx = false;
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+
+      if (this.isBridgeLog(log)) {
+        bridgeSeen = true;
+      }
+
+      if (this.isValidationLog(log)) {
+        validationTx = true;
+      } else if (this.isExecutionLog(log)) {
+        executeTx = true;
+      }
+    }
+
+    if (!bridgeSeen) {
+      throw new Error("Transaction not recognized");
+    }
+
+    return { validationTx, executeTx, receipt, client };
+  }
+
+  async getValidationTxFromMsgHash(
+    msgHash: Hex,
+    isMainnet: boolean
+  ): Promise<{ validationTx: ValidationTxDetails; pubkey: Hex }> {
+    console.log({ msgHash });
+
+    const client = isMainnet ? this.baseClient : this.baseSepoliaClient;
+
+    const res = await fetch(
+      `/api/etherscan/logs?chainId=${this.recognizedChainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
+    );
+
+    if (!res.ok) {
+      throw new Error("Validation tx not found");
+    }
+
+    const json = await res.json();
+    console.log({ json });
+    const logs = json.result;
+
+    if (logs.length === 0) {
+      throw new Error("No logs found in validation tx receipt");
+    }
+
+    const [log] = logs;
+    const prevalidatedBlockHash = log.blockHash;
+    const prevalidatedTransactionHash = log.transactionHash;
+    const block = await client.getBlock({
+      blockHash: prevalidatedBlockHash,
+    });
+    const prevalidatedTimestamp = block.timestamp;
+    const pubkey = this.extractPubkeyFromLog(log);
+    console.log({ prevalidatedTransactionHash, prevalidatedTimestamp });
+    return {
+      validationTx: {
+        chain: client.chain.name as ChainName,
+        transactionHash: prevalidatedTransactionHash,
+        timestamp: new Date(Number(prevalidatedTimestamp) * 1000).toString(),
+      },
+      pubkey,
+    };
+  }
+
+  async getExecutionTxFromReceipt(
+    receipt: TransactionReceipt,
+    isMainnet: boolean
+  ): Promise<ExecuteTxDetails> {
+    const client = isMainnet ? this.baseClient : this.baseSepoliaClient;
+
+    const { logs } = receipt;
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+
+      if (this.isTransferExecutionLog(log)) {
+        const decodedData = decodeEventLog({
+          abi: Bridge,
+          data: log.data,
+          topics: log.topics,
+        }) as {
+          eventName: string;
+          args: {
+            localToken: `0x${string}`;
+            remoteToken: `0x${string}`;
+            to: `0x${string}`;
+            amount: bigint;
+          };
+        };
+        const amount = String(decodedData.args.amount);
+        const receiverAddress = String(decodedData.args.to);
+        const localToken = decodedData.args.localToken;
+
+        const calls: any = [
+          client.getBlock({ blockHash: receipt.blockHash }),
+          client.multicall({
+            contracts: [
+              {
+                address: localToken,
+                abi: ERC20,
+                functionName: "symbol",
+              },
+              {
+                address: localToken,
+                abi: ERC20,
+                functionName: "decimals",
+              },
+            ],
+          }),
+        ];
+
+        let asset = "";
+        let decimals = 18;
+
+        const [block, multicallResults] = await Promise.all(calls);
+        const [assetRes, decimalsRes] = multicallResults;
+        if (assetRes.status === "success") {
+          asset = assetRes.result;
+        }
+        if (decimalsRes.status === "success") {
+          decimals = decimalsRes.result;
+        }
+
+        return {
+          status: "success",
+          amount: formatUnitsString(amount, decimals),
+          asset,
+          chain: client.chain.name as ChainName,
+          receiverAddress,
+          transactionHash: receipt.transactionHash,
+          timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+        };
+      }
+    }
+
+    throw new Error("Execution tx info not found in receipt");
+  }
+
+  private async getExecutionTxFromMsgHash(
+    msgHash: Hex,
+    isMainnet: boolean
+  ): Promise<ExecuteTxDetails> {
+    console.log({ msgHash });
+
+    const chainId = isMainnet ? base.id : baseSepolia.id;
+    const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
+    const client = createPublicClient({
+      chain: isMainnet ? base : baseSepolia,
+      transport: http(),
+    });
+
+    const res = await fetch(
+      `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_SUCCESSFULLY_RELAYED_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
+    );
+
+    if (!res.ok) {
+      // Check if attempted
+      const res = await fetch(
+        `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${FAILED_TO_RELAY_MESSAGE_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
+      );
+
+      if (!res.ok) {
+        throw new Error("Error querying for execution tx logs");
+      }
+
+      const json = await res.json();
+      console.log({ failedDeliveredRes: json });
+      const failureLogs = json.result;
+
+      if (failureLogs.length > 0) {
+        // Message execution was attempted but failed
+        return {
+          status: "failed",
+          amount: "0",
+          asset: "",
+          chain: chainName,
+          receiverAddress: "",
+          transactionHash: "",
+          timestamp: "",
+        };
+      }
+    }
+
+    const json = await res.json();
+    console.log({ deliveredRes: json });
+    const deliveredLogs = json.result;
+
+    if (deliveredLogs.length === 0) {
+      throw new Error("Execution tx not found for msg hash");
+    }
+
+    const [log] = deliveredLogs;
+    const executedTransactionHash = log.transactionHash;
+    const receipt = await client.getTransactionReceipt({
+      hash: executedTransactionHash,
+    });
+    return await this.getExecutionTxFromReceipt(receipt, isMainnet);
+  }
+
+  private isBridgeLog(log: Log): boolean {
+    return (
+      log.address.toLowerCase() ===
+        bridgeValidatorAddress[this.recognizedChainId].toLowerCase() ||
+      log.address.toLowerCase() ===
+        bridgeAddress[this.recognizedChainId].toLowerCase()
+    );
+  }
+
+  private isValidationLog(log: Log): boolean {
+    return (
+      log.address.toLowerCase() ===
+        bridgeValidatorAddress[this.recognizedChainId].toLowerCase() &&
+      log.topics[0] === MESSAGE_REGISTERED_TOPIC
+    );
+  }
+
+  private isExecutionLog(log: Log): boolean {
+    return (
+      log.address.toLowerCase() ===
+        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      log.topics[0] === MESSAGE_SUCCESSFULLY_RELAYED_TOPIC
+    );
+  }
+
+  private isTransferExecutionLog(log: Log): boolean {
+    return (
+      log.address.toLowerCase() ===
+        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      log.topics[0] === TRANSFER_FINALIZED_TOPIC
+    );
+  }
+
+  private extractMsgHashFromReceipt(receipt: TransactionReceipt): Hex {
+    const { logs } = receipt;
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+
+      if (this.isValidationLog(log)) {
+        const decodedData = decodeEventLog({
+          abi: BridgeValidator,
+          data: log.data,
+          topics: log.topics,
+        }) as {
+          eventName: "MessageRegistered";
+          args: {
+            messageHash: `0x${string}`;
+            outgoingMessagePubkey: `0x${string}`;
+          };
+        };
+        // pubkey = decodedData.args.outgoingMessagePubkey;
+        return decodedData.args.messageHash as Hex;
+      } else if (this.isExecutionLog(log)) {
+        if (log.topics.length > 2) {
+          return log.topics[2] as Hex;
+        }
+      }
+    }
+
+    throw new Error("Message hash not found in receipt");
+  }
+
+  private extractPubkeyFromReceipt(receipt: TransactionReceipt): Hex {
+    const { logs } = receipt;
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+
+      if (this.isValidationLog(log)) {
+        return this.extractPubkeyFromLog(log);
+      } else if (this.isExecutionLog(log)) {
+        // TODO: I don't think this is right
+        if (log.topics.length > 2) {
+          return log.topics[2] as Hex;
+        }
+      }
+    }
+
+    throw new Error("Pubkey not found in receipt");
+  }
+
+  private extractPubkeyFromLog(log: Log): Hex {
+    const decodedData = decodeEventLog({
+      abi: BridgeValidator,
+      data: log.data,
+      topics: log.topics,
+    }) as {
+      eventName: "MessageRegistered";
+      args: {
+        messageHash: `0x${string}`;
+        outgoingMessagePubkey: `0x${string}`;
+      };
+    };
+    return decodedData.args.outgoingMessagePubkey;
+  }
+}

@@ -1,84 +1,22 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Hash } from "viem";
+import { BaseMessageDecoder } from "@/lib/base";
 import {
-  Address,
-  createPublicClient,
-  decodeEventLog,
-  Hash,
-  Hex,
-  http,
-  zeroAddress,
-} from "viem";
-import { base, baseSepolia } from "viem/chains";
-import Bridge from "../../abis/Bridge";
-import ERC20 from "../../abis/ERC20";
-import {
-  Address as SolAddress,
-  createSolanaRpc,
-  devnet,
-  mainnet,
-  Signature,
-  address,
-  fetchEncodedAccount,
-  MaybeEncodedAccount,
-  ReadonlyUint8Array,
-  Account,
-  getBase58Codec,
-} from "@solana/kit";
-import {
-  decodeOutgoingMessage,
-  fetchOutgoingMessage,
-  getOutgoingMessageDiscriminatorBytes,
-  getOutputRootDiscriminatorBytes,
-  OutgoingMessage,
-} from "../../clients/ts/src/bridge";
-import { deriveMessageHash } from "@/lib/evm";
-import BridgeValidator from "../../abis/BridgeValidator";
-
-// TODO: validation tx hash input for Solana -> Base is taking a long time
+  ChainName,
+  ExecuteTxDetails,
+  InitialTxDetails,
+  ValidationTxDetails,
+} from "@/lib/transaction";
+import { ResultKind, SolanaMessageDecoder } from "@/lib/solana";
 
 type InputKind = "solana" | "base" | "unknown";
-
-type ResultKind = "message" | "output_root";
 
 enum BridgeStatus {
   Pending = "pending",
   Validated = "pre-validated",
   Executed = "executed",
-}
-
-enum ChainName {
-  Solana = "Solana",
-  Base = "Base",
-  SolanaDevnet = "Solana Devnet",
-  BaseSepolia = "Base Sepolia",
-}
-
-interface InitialTxDetails {
-  amount: string;
-  asset: string;
-  chain: ChainName;
-  senderAddress: string;
-  transactionHash: string;
-  timestamp: string;
-  isOutputRoot?: boolean;
-}
-
-interface ExecuteTxDetails {
-  status: string;
-  amount: string;
-  asset: string;
-  chain: ChainName;
-  receiverAddress: string;
-  transactionHash: string;
-  timestamp: string;
-}
-
-interface ValidationTxDetails {
-  chain: ChainName;
-  transactionHash: string;
-  timestamp: string;
 }
 
 interface BridgeQueryResult {
@@ -88,59 +26,6 @@ interface BridgeQueryResult {
   executeTx?: ExecuteTxDetails;
   validationTx?: ValidationTxDetails;
   kind?: ResultKind;
-}
-
-const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
-  "0x68bfb2e57fcbb47277da442d81d3e40ff118cbbcaf345b07997b35f592359e49";
-const FAILED_TO_RELAY_MESSAGE_TOPIC =
-  "0x1dc47a66003d9a2334f04c3d23d98f174d7e65e9a4a72fa13277a15120c1559e";
-const TRANSFER_FINALIZED_TOPIC =
-  "0x6899b9db6ebabd932aa1fc835134c9b9ca2168d78a4cbee8854b1c00c8647609";
-const MESSAGE_REGISTERED_TOPIC =
-  "0x5e55930eb861ee57d9b7fa9e506b7f413cb1599c9886e57f1c8091f5fee5fc33";
-
-const SOL_ADDRESS = "SoL1111111111111111111111111111111111111111";
-
-const bridgeAddress = {
-  8453: "", // Base Mainnet
-  84532: "0xB2068ECCDb908902C76E3f965c1712a9cF64171E", // Base Sepolia
-};
-const bridgeValidatorAddress = {
-  8453: "", // Base Mainnet
-  84532: "0x8D2cD165360ACF5f0145661a8FB0Ff5D3729Ef9A", // Base Sepolia
-};
-const bridgeProgram = {
-  [ChainName.Solana]: "",
-  [ChainName.SolanaDevnet]: "HSvNvzehozUpYhRBuCKq3Fq8udpRocTmGMUYXmCSiCCc",
-};
-
-function bytes32ToPubkey(inp: string): SolAddress {
-  if (inp.startsWith("0x")) {
-    inp = inp.slice(2);
-  }
-  return address(
-    getBase58Codec().decode(Uint8Array.from(Buffer.from(inp, "hex")))
-  );
-}
-
-function isOutgoingMessage(acct: MaybeEncodedAccount<string>): boolean {
-  return isExpectedAccount(acct, getOutgoingMessageDiscriminatorBytes());
-}
-
-function isOutputRoot(acct: MaybeEncodedAccount<string>): boolean {
-  return isExpectedAccount(acct, getOutputRootDiscriminatorBytes());
-}
-
-function isExpectedAccount(
-  acct: MaybeEncodedAccount<string>,
-  d: ReadonlyUint8Array
-): boolean {
-  return (
-    acct.exists &&
-    acct.data instanceof Uint8Array &&
-    acct.data.length >= d.length &&
-    d.every((byte, i) => acct.data[i] === byte)
-  );
 }
 
 function detectInputKind(value: string): InputKind {
@@ -178,522 +63,6 @@ function getExplorerTxUrl(chain: ChainName, tx: string): string | undefined {
   }
 }
 
-// Formats a big integer value given its token decimals into a human-friendly string
-function formatUnitsString(
-  value: string,
-  decimals: number,
-  maxFractionDigits = 6
-): string {
-  const isNegative = value.startsWith("-");
-  const digits = isNegative ? value.slice(1) : value;
-  const trimmed = digits.replace(/^0+/, "") || "0";
-
-  if (decimals === 0) {
-    return (isNegative ? "-" : "") + trimmed;
-  }
-
-  const padded = trimmed.padStart(decimals + 1, "0");
-  const integerPart = padded.slice(0, padded.length - decimals);
-  let fractionPart = padded.slice(padded.length - decimals);
-
-  // Trim trailing zeros, then clamp to maxFractionDigits
-  fractionPart = fractionPart.replace(/0+$/, "");
-  if (fractionPart.length > maxFractionDigits) {
-    fractionPart = fractionPart.slice(0, maxFractionDigits);
-  }
-
-  return (
-    (isNegative ? "-" : "") +
-    integerPart +
-    (fractionPart ? `.${fractionPart}` : "")
-  );
-}
-
-async function lookupBaseDelivery(
-  msgHash: Hex,
-  isMainnet: boolean
-): Promise<[ExecuteTxDetails | undefined, ValidationTxDetails | undefined]> {
-  console.log({ msgHash });
-
-  const chainId = isMainnet ? base.id : baseSepolia.id;
-  const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
-  const client = createPublicClient({
-    chain: isMainnet ? base : baseSepolia,
-    transport: http(),
-  });
-
-  let transactionHash = "";
-  let timestamp = "";
-  let status = "";
-  let validationTx: ValidationTxDetails | undefined;
-
-  const res = await fetch(
-    `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
-  );
-
-  if (res.ok) {
-    const json = await res.json();
-    console.log({ json });
-    const logs = json.result;
-    if (logs.length > 0) {
-      const [log] = logs;
-      const prevalidatedBlockHash = log.blockHash;
-      const prevalidatedTransactionHash = log.transactionHash;
-      const block = await client.getBlock({ blockHash: prevalidatedBlockHash });
-      const prevalidatedTimestamp = block.timestamp;
-      console.log({ prevalidatedTransactionHash, prevalidatedTimestamp });
-      validationTx = {
-        chain: chainName,
-        transactionHash: prevalidatedTransactionHash,
-        timestamp: new Date(Number(prevalidatedTimestamp) * 1000).toString(),
-      };
-
-      const res = await fetch(
-        `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_SUCCESSFULLY_RELAYED_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
-      );
-
-      if (res.ok) {
-        const json = await res.json();
-        console.log({ deliveredRes: json });
-        const deliveredLogs = json.result;
-
-        if (deliveredLogs.length > 0) {
-          const [log] = deliveredLogs;
-          const executedBlockHash = log.blockHash;
-          const executedTransactionHash = log.transactionHash;
-          const block = await client.getBlock({ blockHash: executedBlockHash });
-          const executedTimestamp = block.timestamp;
-          timestamp = new Date(Number(executedTimestamp) * 1000).toString();
-          transactionHash = executedTransactionHash;
-          const [executeTx] = await lookupBaseTxReceipt(
-            executedTransactionHash,
-            true
-          );
-          return [executeTx, validationTx];
-        }
-      } else {
-        // Check if attempted
-        const res = await fetch(
-          `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${FAILED_TO_RELAY_MESSAGE_TOPIC}&topic0_1_opr=and&topic2=${msgHash}`
-        );
-
-        if (res.ok) {
-          const json = await res.json();
-          console.log({ failedDeliveredRes: json });
-          const failureLogs = json.result;
-
-          if (failureLogs.length > 0) {
-            // Message execution was attempted but failed
-            status = "failed";
-          }
-        }
-      }
-    }
-  }
-
-  return [
-    {
-      status,
-      amount: "0",
-      asset: "",
-      chain: chainName,
-      receiverAddress: "",
-      transactionHash,
-      timestamp,
-    },
-    validationTx,
-  ];
-}
-
-async function lookupBaseValidationTx(
-  msgHash: Hex,
-  isMainnet: boolean
-): Promise<[ValidationTxDetails | undefined, Hex]> {
-  const chainId = isMainnet ? base.id : baseSepolia.id;
-  const chainName = isMainnet ? ChainName.Base : ChainName.BaseSepolia;
-  const client = createPublicClient({
-    chain: isMainnet ? base : baseSepolia,
-    transport: http(),
-  });
-
-  const res = await fetch(
-    `/api/etherscan/logs?chainId=${chainId}&module=logs&action=getLogs&topic0=${MESSAGE_REGISTERED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
-  );
-  if (!res.ok) return [undefined, "0x"];
-  const json = await res.json();
-  const logs = json.result;
-  if (!Array.isArray(logs) || logs.length === 0) return [undefined, "0x"];
-  const [log] = logs;
-  const decodedData = decodeEventLog({
-    abi: BridgeValidator,
-    data: log.data,
-    topics: log.topics,
-  }) as {
-    eventName: "MessageRegistered";
-    args: {
-      messageHash: `0x${string}`;
-      outgoingMessagePubkey: `0x${string}`;
-    };
-  };
-  const pubkey = decodedData.args.outgoingMessagePubkey;
-  const block = await client.getBlock({ blockHash: log.blockHash });
-  return [
-    {
-      chain: chainName,
-      transactionHash: log.transactionHash,
-      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
-    },
-    pubkey,
-  ];
-}
-
-async function lookupBaseTxReceipt(
-  hash: Hash,
-  solanaChecked: boolean
-): Promise<
-  [
-    ExecuteTxDetails | undefined,
-    InitialTxDetails | undefined,
-    ValidationTxDetails | undefined
-  ]
-> {
-  const chainId = baseSepolia.id;
-  const chainName = ChainName.BaseSepolia;
-  const client = createPublicClient({
-    chain: baseSepolia,
-    transport: http(),
-  });
-  const receipt = await client.getTransactionReceipt({ hash });
-  console.log({ receipt });
-  const { logs } = receipt;
-
-  let messageRegistered = false;
-  let messageSuccessfullyRelayed = false;
-  let transferFinalized = false;
-  let bridgeSeen = false;
-  let messageHash: Hex | undefined = undefined;
-  let receiverAddress = "";
-  let asset = "";
-  let localToken: Address = zeroAddress;
-  let amount = "0";
-  let decimals = 18;
-  let pubkey = "0x" as Hex;
-  let isValidationTx = false;
-  let initTx = undefined;
-  for (let i = 0; i < logs.length; i++) {
-    const log = logs[i];
-    if (
-      log.address.toLowerCase() ===
-        bridgeValidatorAddress[chainId].toLowerCase() ||
-      log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase()
-    ) {
-      bridgeSeen = true;
-    }
-
-    if (
-      log.address.toLowerCase() ===
-        bridgeValidatorAddress[chainId].toLowerCase() &&
-      log.topics[0] === MESSAGE_REGISTERED_TOPIC
-    ) {
-      messageRegistered = true;
-      const decodedData = decodeEventLog({
-        abi: BridgeValidator,
-        data: log.data,
-        topics: log.topics,
-      }) as {
-        eventName: "MessageRegistered";
-        args: {
-          messageHash: `0x${string}`;
-          outgoingMessagePubkey: `0x${string}`;
-        };
-      };
-      pubkey = decodedData.args.outgoingMessagePubkey;
-      // Capture message hash from validation event as well
-      messageHash = decodedData.args.messageHash as Hex;
-      isValidationTx = true;
-    } else if (
-      log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase() &&
-      log.topics[0] === TRANSFER_FINALIZED_TOPIC
-    ) {
-      transferFinalized = true;
-      const decodedData = decodeEventLog({
-        abi: Bridge,
-        data: log.data,
-        topics: log.topics,
-      }) as {
-        eventName: string;
-        args: {
-          localToken: `0x${string}`;
-          remoteToken: `0x${string}`;
-          to: `0x${string}`;
-          amount: bigint;
-        };
-      };
-      amount = String(decodedData.args.amount);
-      receiverAddress = String(decodedData.args.to);
-      localToken = decodedData.args.localToken;
-    } else if (
-      log.address.toLowerCase() === bridgeAddress[chainId].toLowerCase() &&
-      log.topics[0] === MESSAGE_SUCCESSFULLY_RELAYED_TOPIC
-    ) {
-      messageSuccessfullyRelayed = true;
-      if (log.topics.length > 2) {
-        messageHash = log.topics[2] as Hex;
-      }
-    }
-  }
-
-  const calls: any = [client.getBlock({ blockHash: receipt.blockHash })];
-  if (localToken !== zeroAddress) {
-    calls.push(
-      client.multicall({
-        contracts: [
-          {
-            address: localToken,
-            abi: ERC20,
-            functionName: "symbol",
-          },
-          {
-            address: localToken,
-            abi: ERC20,
-            functionName: "decimals",
-          },
-        ],
-      })
-    );
-  }
-
-  const [block, multicallResults] = await Promise.all(calls);
-
-  if (multicallResults) {
-    const [assetRes, decimalsRes] = multicallResults;
-    if (assetRes.status === "success") {
-      asset = assetRes.result;
-    }
-    if (decimalsRes.status === "success") {
-      decimals = decimalsRes.result;
-    }
-  }
-
-  console.log({
-    messageRegistered,
-    messageSuccessfullyRelayed,
-    transferFinalized,
-    bridgeSeen,
-  });
-
-  if (!bridgeSeen) {
-    throw new Error("Transaction not recognized");
-  }
-
-  let validationTx: ValidationTxDetails | undefined = undefined;
-  let executeTx: ExecuteTxDetails | undefined = undefined;
-
-  if (messageSuccessfullyRelayed && !messageRegistered) {
-    if (!messageHash) {
-      throw new Error(
-        "Message hash should be defined if message has been successfully relayed"
-      );
-    }
-    // Look up message registered
-    [validationTx, pubkey] = await lookupBaseValidationTx(
-      messageHash,
-      (chainId as any) === base.id
-    );
-  } else if (messageRegistered && !messageSuccessfullyRelayed) {
-    if (!messageHash) {
-      throw new Error(
-        "Message hash should be defined if message has been registered"
-      );
-    }
-
-    // Look up execute tx
-    [executeTx] = await lookupBaseDelivery(
-      messageHash,
-      (chainId as any) === base.id
-    );
-  }
-
-  if (!solanaChecked && pubkey !== "0x") {
-    // Find Solana init transaction
-    [initTx] = await findSolanaInitTx(bytes32ToPubkey(pubkey));
-  }
-
-  // If this is an execute tx, populate execute details
-  if ((transferFinalized || messageSuccessfullyRelayed) && !executeTx) {
-    executeTx = {
-      status: "success",
-      amount: formatUnitsString(amount, decimals),
-      asset,
-      chain: chainName,
-      receiverAddress,
-      transactionHash: hash,
-      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
-    };
-  }
-  if (isValidationTx && !validationTx) {
-    // This tx is a validation (MessageRegistered) tx
-    validationTx = {
-      chain: chainName,
-      transactionHash: hash,
-      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
-    };
-  }
-
-  return [executeTx, initTx, validationTx];
-}
-
-async function findSolanaInitTx(pubkey: SolAddress) {
-  const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
-  const devnetUrl = devnet("https://api.devnet.solana.com");
-  const mainnetRpc = createSolanaRpc(mainnetUrl);
-  const devnetRpc = createSolanaRpc(devnetUrl);
-  const isMainnet = false;
-  const rpc = devnetRpc;
-  const outgoingMessage = await fetchOutgoingMessage(rpc, pubkey);
-  console.log({ outgoingMessage });
-  const res = await rpc.getSignaturesForAddress(pubkey).send();
-  console.log({ res });
-  if (res.length !== 1) {
-    throw new Error(
-      "Unexpected transaction signature count for outgoing message"
-    );
-  }
-  return await lookupSolanaInitialTx(res[0].signature);
-}
-
-async function lookupSolanaInitialTx(
-  signature: string
-): Promise<
-  [
-    InitialTxDetails,
-    ExecuteTxDetails | undefined,
-    ResultKind | undefined,
-    ValidationTxDetails | undefined
-  ]
-> {
-  const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
-  const devnetUrl = devnet("https://api.devnet.solana.com");
-  const mainnetRpc = createSolanaRpc(mainnetUrl);
-  const devnetRpc = createSolanaRpc(devnetUrl);
-  const isMainnet = false;
-  const rpc = devnetRpc;
-  const transaction = await rpc
-    .getTransaction(signature as Signature, {
-      encoding: "jsonParsed",
-      maxSupportedTransactionVersion: 0,
-    })
-    .send();
-  console.log({ transaction });
-
-  let senderAddress = "";
-  let asset = "";
-  let amount = "0";
-  let executeTx: ExecuteTxDetails | undefined;
-  let validationTx: ValidationTxDetails | undefined;
-  let resultKind: ResultKind | undefined;
-
-  if (!transaction) {
-    throw new Error("Solana transaction not found");
-  }
-
-  const { message } = transaction.transaction;
-
-  let bridgeSeen = false;
-  const newAccounts = [];
-
-  for (let i = 0; i < message.instructions.length; i++) {
-    const ix = message.instructions[i];
-    if (ix.programId === bridgeProgram[ChainName.SolanaDevnet]) {
-      bridgeSeen = true;
-    }
-  }
-
-  console.log({ bridgeSeen });
-
-  if (!bridgeSeen) {
-    throw new Error("Transaction not recognized");
-  }
-
-  const innerInstructions = transaction.meta?.innerInstructions ?? [];
-
-  for (let i = 0; i < innerInstructions.length; i++) {
-    const { instructions } = innerInstructions[i];
-
-    for (let j = 0; j < instructions.length; j++) {
-      const ix = instructions[j];
-      if (!("parsed" in ix) || ix.parsed.type !== "createAccount") {
-        continue;
-      }
-
-      const info = ix.parsed.info;
-
-      if (!info || !("owner" in info) || !("newAccount" in info)) {
-        continue;
-      }
-
-      if (info.owner === bridgeProgram[ChainName.SolanaDevnet]) {
-        newAccounts.push(info.newAccount);
-        const encodedAcct = await fetchEncodedAccount(
-          rpc,
-          address(info.newAccount as string)
-        );
-        console.log({ encodedAcct });
-
-        if (isOutgoingMessage(encodedAcct)) {
-          const acct = decodeOutgoingMessage(encodedAcct) as Account<
-            OutgoingMessage,
-            string
-          >;
-
-          console.log({ acct });
-          senderAddress = acct.data.sender ?? "";
-
-          if (acct.data.message.__kind === "Transfer") {
-            const msg = acct.data.message.fields[0];
-            amount = msg.amount.toString();
-
-            if (msg.localToken === SOL_ADDRESS) {
-              asset = "SOL";
-              amount = String(Number(msg.amount) / 1_000_000_000);
-            } else {
-              // Figure out what localToken is
-              asset = "unknown SPL";
-            }
-          }
-
-          const msgHash = deriveMessageHash(acct);
-          const [deliveredTx, vTx] = await lookupBaseDelivery(
-            msgHash,
-            isMainnet
-          );
-          executeTx = deliveredTx;
-          validationTx = vTx;
-          resultKind = "message";
-        } else if (isOutputRoot(encodedAcct)) {
-          resultKind = "output_root";
-        }
-      }
-    }
-  }
-
-  return [
-    {
-      amount,
-      asset,
-      chain: ChainName.SolanaDevnet,
-      senderAddress,
-      transactionHash: signature,
-      timestamp: new Date(
-        Number(transaction?.blockTime ?? 0) * 1000
-      ).toString(),
-    },
-    executeTx,
-    resultKind,
-    validationTx,
-  ];
-}
-
 export default function Home() {
   const [transactionHash, setTransactionHash] = useState("");
   const kind = useMemo(
@@ -724,36 +93,42 @@ export default function Home() {
       return;
     }
 
+    const baseDecoder = new BaseMessageDecoder();
+    const solanaDecoder = new SolanaMessageDecoder();
+
     try {
       setIsLoading(true);
       if (kind === "base") {
-        const [executeTx, initialTx, validationTx] = await lookupBaseTxReceipt(
-          transactionHash.trim() as Hash,
-          false
-        );
+        const { validationTxDetails, executeTxDetails, pubkey } =
+          await baseDecoder.getBaseMessageInfoFromTransactionHash(
+            transactionHash.trim() as Hash
+          );
+        const { initTx } = await solanaDecoder.findSolanaInitTx(pubkey);
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
-          initialTx,
-          executeTx,
-          validationTx,
-          status: executeTx
+          initialTx: initTx,
+          executeTx: executeTxDetails,
+          validationTx: validationTxDetails,
+          status: executeTxDetails
             ? BridgeStatus.Executed
-            : validationTx
+            : validationTxDetails
             ? BridgeStatus.Validated
             : BridgeStatus.Pending,
         };
         setResult(r);
       } else {
-        const [initialTx, executeTx, kindFlag, validationTx] =
-          await lookupSolanaInitialTx(transactionHash.trim());
+        const { initTx, kind, msgHash } =
+          await solanaDecoder.lookupSolanaInitialTx(transactionHash.trim());
+        let executeTx, validationTx;
+
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
-          initialTx,
-          executeTx,
-          kind: kindFlag,
-          validationTx,
+          initialTx: initTx,
+          // executeTx,
+          kind,
+          // validationTx,
           status:
-            kindFlag === "output_root"
+            kind === "output_root"
               ? undefined
               : executeTx
               ? BridgeStatus.Executed
