@@ -43,7 +43,7 @@ const MESSAGE_INITIATED_TOPIC =
   "0xbaa7ef9db66a2e95a218100288cf439de5fbe1e4ed665cd1a2f01278242c9fc4";
 
 // Formats a big integer value given its token decimals into a human-friendly string
-function formatUnitsString(
+export function formatUnitsString(
   value: string,
   decimals: number,
   maxFractionDigits = 6

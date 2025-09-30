@@ -7,6 +7,7 @@ import {
   fetchEncodedAccount,
   getBase58Codec,
   getProgramDerivedAddress,
+  getPublicKeyFromAddress,
   mainnet,
   MaybeEncodedAccount,
   ReadonlyUint8Array,
@@ -24,9 +25,21 @@ import {
   getOutputRootDiscriminatorBytes,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
-import { ChainName, InitialTxDetails } from "./transaction";
+import {
+  ChainName,
+  ExecuteTxDetails,
+  InitialTxDetails,
+  ValidationTxDetails,
+} from "./transaction";
 import { deriveMessageHash } from "./evm";
 import { Hex, toBytes } from "viem";
+import {
+  getMint,
+  getTokenMetadata,
+  TOKEN_2022_PROGRAM_ID,
+} from "@solana/spl-token";
+import { Connection, PublicKey } from "@solana/web3.js";
+import { formatUnitsString } from "./base";
 
 export enum ResultKind {
   Message = "message",
@@ -76,8 +89,15 @@ export class SolanaMessageDecoder {
     return await this.lookupSolanaInitialTx(res[0].signature);
   }
 
-  async findSolanaDeliveryFromMsgHash(msgHash: Hex, isMainnet: boolean) {
+  async findSolanaDeliveryFromMsgHash(
+    msgHash: Hex,
+    isMainnet: boolean
+  ): Promise<{
+    validationTxDetails?: ValidationTxDetails;
+    executeTxDetails?: ExecuteTxDetails;
+  }> {
     const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
+    const chain = isMainnet ? ChainName.Solana : ChainName.SolanaDevnet;
     const [messageAddress] = await getProgramDerivedAddress({
       programAddress: address(
         bridgeProgram[isMainnet ? ChainName.Solana : ChainName.SolanaDevnet]
@@ -87,8 +107,90 @@ export class SolanaMessageDecoder {
     try {
       const incomingMessage = await fetchIncomingMessage(rpc, messageAddress);
       console.log({ incomingMessage });
+      const res = await rpc.getSignaturesForAddress(messageAddress).send();
+      console.log({ res });
+      if (res.length === 0) {
+        return {};
+      }
+      const [tx1, tx2] = res;
+
+      const validationTx = tx2 ?? tx1;
+      const executeTx = tx2 ? tx1 : tx2;
+
+      console.log({ executeTx });
+
+      const validationTxDetails = {
+        chain,
+        transactionHash: validationTx.signature,
+        timestamp: new Date(
+          Number(validationTx.blockTime ?? 0) * 1000
+        ).toString(),
+      };
+
+      let executeTxDetails: ExecuteTxDetails | undefined;
+      if (executeTx) {
+        let amount = "";
+        let asset = "";
+        let receiverAddress = "";
+
+        const { message: msg } = incomingMessage.data;
+
+        if (msg.__kind === "Transfer") {
+          if (msg.transfer.__kind === "WrappedToken") {
+            // TODO: query metadata extension for SPL 2022 token
+            const conn = new Connection("https://api.devnet.solana.com");
+            const mintPk = new PublicKey(msg.transfer.fields[0].localToken);
+            const metadata = await getTokenMetadata(
+              conn,
+              mintPk,
+              "finalized",
+              TOKEN_2022_PROGRAM_ID
+            );
+
+            const mintInfo = await getMint(
+              conn,
+              mintPk,
+              "finalized",
+              TOKEN_2022_PROGRAM_ID
+            );
+
+            console.log({ metadata });
+            console.log({ mintInfo });
+
+            amount = formatUnitsString(
+              String(msg.transfer.fields[0].amount),
+              mintInfo.decimals
+            );
+            asset = metadata?.symbol ?? msg.transfer.fields[0].localToken;
+            receiverAddress = msg.transfer.fields[0].to;
+          } else {
+            console.error(
+              "Unrecognized IncomingMessage transfer type",
+              msg.transfer.__kind
+            );
+            return {};
+          }
+        } else {
+          console.error("Unrecognized IncomingMessage type", msg.__kind);
+          return {};
+        }
+        // Parse executeTx
+        executeTxDetails = {
+          status: "success",
+          amount,
+          asset,
+          chain,
+          receiverAddress,
+          transactionHash: executeTx.signature,
+          timestamp: new Date(
+            Number(executeTx.blockTime ?? 0) * 1000
+          ).toString(),
+        };
+      }
+
+      return { validationTxDetails, executeTxDetails };
     } catch {
-      return;
+      return {};
     }
   }
 

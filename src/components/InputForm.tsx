@@ -6,7 +6,12 @@ import { BaseMessageDecoder } from "@/lib/base";
 import { SolanaMessageDecoder } from "@/lib/solana";
 import { Hash } from "viem";
 import { BridgeQueryResult, BridgeStatus } from "@/lib/bridge";
-import { ChainName, InitialTxDetails } from "@/lib/transaction";
+import {
+  ChainName,
+  ExecuteTxDetails,
+  InitialTxDetails,
+  ValidationTxDetails,
+} from "@/lib/transaction";
 
 export type InputKind = "solana" | "base" | "unknown";
 
@@ -82,10 +87,22 @@ export const InputForm = ({
           throw new Error("Initial tx details not found");
         }
 
+        let validationTx: ValidationTxDetails | undefined = validationTxDetails;
+        let executeTx: ExecuteTxDetails | undefined = executeTxDetails;
         if (initTxDetails && msgHash) {
           // Find Solana delivery
           const isMainnet = initTxDetails.chain === ChainName.Base;
-          await solanaDecoder.findSolanaDeliveryFromMsgHash(msgHash, isMainnet);
+          const { validationTxDetails, executeTxDetails } =
+            await solanaDecoder.findSolanaDeliveryFromMsgHash(
+              msgHash,
+              isMainnet
+            );
+          if (validationTxDetails) {
+            validationTx = validationTxDetails;
+          }
+          if (executeTxDetails) {
+            executeTx = executeTxDetails;
+          }
         } else {
           throw new Error("Unable to find Solana delivery");
         }
@@ -93,8 +110,8 @@ export const InputForm = ({
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
           initialTx,
-          executeTx: executeTxDetails,
-          validationTx: validationTxDetails,
+          executeTx,
+          validationTx,
           status: executeTxDetails
             ? BridgeStatus.Executed
             : validationTxDetails
