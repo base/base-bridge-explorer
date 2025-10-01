@@ -5,6 +5,7 @@ import {
   createSolanaRpc,
   devnet,
   fetchEncodedAccount,
+  fetchEncodedAccounts,
   getBase58Codec,
   getProgramDerivedAddress,
   mainnet,
@@ -24,6 +25,7 @@ import {
   getIncomingMessageDiscriminatorBytes,
   getOutgoingMessageDiscriminatorBytes,
   getOutputRootDiscriminatorBytes,
+  getRelayMessageDiscriminatorBytes,
   IncomingMessage,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
@@ -337,6 +339,27 @@ export class SolanaMessageDecoder {
       const ix = message.instructions[i];
       if (ix.programId === bridgeProgram[ChainName.SolanaDevnet]) {
         bridgeSeen = true;
+        if (this.isRelayMessageCall(ix)) {
+          // Lookup accounts
+          if ("accounts" in ix) {
+            const encodedAccts = await fetchEncodedAccounts(
+              rpc,
+              ix.accounts.map((acct) => acct)
+            );
+
+            for (let j = 0; j < encodedAccts.length; j++) {
+              const encodedAcct = encodedAccts[j];
+              if (this.isIncomingMessage(encodedAcct)) {
+                return {
+                  kind: ResultKind.IncomingMessage,
+                  encodedAcct,
+                  transaction,
+                  isMainnet,
+                };
+              }
+            }
+          }
+        }
       }
     }
 
@@ -413,6 +436,12 @@ export class SolanaMessageDecoder {
 
   private isIncomingMessage(acct: MaybeEncodedAccount<string>): boolean {
     return this.isExpectedAccount(acct, getIncomingMessageDiscriminatorBytes());
+  }
+
+  private isRelayMessageCall(ix: any): boolean {
+    const d = getRelayMessageDiscriminatorBytes();
+    const data = getBase58Codec().encode(ix.data);
+    return data.length >= d.length && d.every((byte, i) => data[i] === byte);
   }
 
   private isExpectedAccount(
