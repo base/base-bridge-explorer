@@ -7,7 +7,6 @@ import {
   fetchEncodedAccount,
   getBase58Codec,
   getProgramDerivedAddress,
-  getPublicKeyFromAddress,
   mainnet,
   MaybeEncodedAccount,
   ReadonlyUint8Array,
@@ -18,11 +17,14 @@ import {
   SolanaRpcApiMainnet,
 } from "@solana/kit";
 import {
+  decodeIncomingMessage,
   decodeOutgoingMessage,
   fetchIncomingMessage,
   fetchOutgoingMessage,
+  getIncomingMessageDiscriminatorBytes,
   getOutgoingMessageDiscriminatorBytes,
   getOutputRootDiscriminatorBytes,
+  IncomingMessage,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
 import {
@@ -32,7 +34,7 @@ import {
   ValidationTxDetails,
 } from "./transaction";
 import { deriveMessageHash } from "./evm";
-import { Hex, toBytes } from "viem";
+import { Hex, toBytes, toHex } from "viem";
 import {
   getMint,
   getTokenMetadata,
@@ -44,6 +46,7 @@ import { formatUnitsString } from "./base";
 export enum ResultKind {
   Message = "message",
   OutputRoot = "output_root",
+  IncomingMessage = "incoming_message",
 }
 
 const SOL_ADDRESS = "SoL1111111111111111111111111111111111111111";
@@ -97,7 +100,6 @@ export class SolanaMessageDecoder {
     executeTxDetails?: ExecuteTxDetails;
   }> {
     const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
-    const chain = isMainnet ? ChainName.Solana : ChainName.SolanaDevnet;
     const [messageAddress] = await getProgramDerivedAddress({
       programAddress: address(
         bridgeProgram[isMainnet ? ChainName.Solana : ChainName.SolanaDevnet]
@@ -107,104 +109,152 @@ export class SolanaMessageDecoder {
     try {
       const incomingMessage = await fetchIncomingMessage(rpc, messageAddress);
       console.log({ incomingMessage });
-      const res = await rpc.getSignaturesForAddress(messageAddress).send();
-      console.log({ res });
-      if (res.length === 0) {
-        return {};
-      }
-      const [tx1, tx2] = res;
-
-      const validationTx = tx2 ?? tx1;
-      const executeTx = tx2 ? tx1 : tx2;
-
-      console.log({ executeTx });
-
-      const validationTxDetails = {
-        chain,
-        transactionHash: validationTx.signature,
-        timestamp: new Date(
-          Number(validationTx.blockTime ?? 0) * 1000
-        ).toString(),
-      };
-
-      let executeTxDetails: ExecuteTxDetails | undefined;
-      if (executeTx) {
-        let amount = "";
-        let asset = "";
-        let receiverAddress = "";
-
-        const { message: msg } = incomingMessage.data;
-
-        if (msg.__kind === "Transfer") {
-          if (msg.transfer.__kind === "WrappedToken") {
-            // TODO: query metadata extension for SPL 2022 token
-            const conn = new Connection("https://api.devnet.solana.com");
-            const mintPk = new PublicKey(msg.transfer.fields[0].localToken);
-            const metadata = await getTokenMetadata(
-              conn,
-              mintPk,
-              "finalized",
-              TOKEN_2022_PROGRAM_ID
-            );
-
-            const mintInfo = await getMint(
-              conn,
-              mintPk,
-              "finalized",
-              TOKEN_2022_PROGRAM_ID
-            );
-
-            console.log({ metadata });
-            console.log({ mintInfo });
-
-            amount = formatUnitsString(
-              String(msg.transfer.fields[0].amount),
-              mintInfo.decimals
-            );
-            asset = metadata?.symbol ?? msg.transfer.fields[0].localToken;
-            receiverAddress = msg.transfer.fields[0].to;
-          } else {
-            console.error(
-              "Unrecognized IncomingMessage transfer type",
-              msg.transfer.__kind
-            );
-            return {};
-          }
-        } else {
-          console.error("Unrecognized IncomingMessage type", msg.__kind);
-          return {};
-        }
-        // Parse executeTx
-        executeTxDetails = {
-          status: "success",
-          amount,
-          asset,
-          chain,
-          receiverAddress,
-          transactionHash: executeTx.signature,
-          timestamp: new Date(
-            Number(executeTx.blockTime ?? 0) * 1000
-          ).toString(),
-        };
-      }
-
-      return { validationTxDetails, executeTxDetails };
+      return this.getSolanaDeliveryFromIncomingMessage(
+        incomingMessage,
+        isMainnet
+      );
     } catch {
       return {};
     }
   }
 
-  async lookupSolanaInitialTx(
-    signature: string
-  ): Promise<{ initTx: InitialTxDetails; kind: ResultKind; msgHash: Hex }> {
-    const { kind, encodedAcct, transaction } = await this.identifySolanaTx(
-      signature
+  private async getSolanaDeliveryFromIncomingMessage(
+    incomingMessage: Account<IncomingMessage, string>,
+    isMainnet: boolean
+  ) {
+    const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
+    const chain = isMainnet ? ChainName.Solana : ChainName.SolanaDevnet;
+    const res = await rpc
+      .getSignaturesForAddress(incomingMessage.address)
+      .send();
+    console.log({ res });
+    if (res.length === 0) {
+      return {};
+    }
+    const [tx1, tx2] = res;
+
+    const validationTx = tx2 ?? tx1;
+    const executeTx = tx2 ? tx1 : tx2;
+
+    console.log({ executeTx });
+
+    const validationTxDetails = {
+      chain,
+      transactionHash: validationTx.signature,
+      timestamp: new Date(
+        Number(validationTx.blockTime ?? 0) * 1000
+      ).toString(),
+    };
+
+    const msgHash = await this.getIncomingMessageHash(
+      validationTx.signature,
+      isMainnet
     );
 
-    let senderAddress = "";
-    let asset = "";
-    let amount = "0";
-    let msgHash: Hex = "0x";
+    let executeTxDetails: ExecuteTxDetails | undefined;
+    if (executeTx) {
+      let amount = "";
+      let asset = "";
+      let receiverAddress = "";
+
+      const { message: msg } = incomingMessage.data;
+
+      if (msg.__kind === "Transfer") {
+        if (msg.transfer.__kind === "WrappedToken") {
+          const conn = new Connection("https://api.devnet.solana.com");
+          const mintPk = new PublicKey(msg.transfer.fields[0].localToken);
+          const metadata = await getTokenMetadata(
+            conn,
+            mintPk,
+            "finalized",
+            TOKEN_2022_PROGRAM_ID
+          );
+
+          const mintInfo = await getMint(
+            conn,
+            mintPk,
+            "finalized",
+            TOKEN_2022_PROGRAM_ID
+          );
+
+          console.log({ metadata });
+          console.log({ mintInfo });
+
+          amount = formatUnitsString(
+            String(msg.transfer.fields[0].amount),
+            mintInfo.decimals
+          );
+          asset = metadata?.symbol ?? msg.transfer.fields[0].localToken;
+          receiverAddress = msg.transfer.fields[0].to;
+        } else {
+          console.error(
+            "Unrecognized IncomingMessage transfer type",
+            msg.transfer.__kind
+          );
+          return {};
+        }
+      } else {
+        console.error("Unrecognized IncomingMessage type", msg.__kind);
+        return {};
+      }
+      // Parse executeTx
+      executeTxDetails = {
+        status: "success",
+        amount,
+        asset,
+        chain,
+        receiverAddress,
+        transactionHash: executeTx.signature,
+        timestamp: new Date(Number(executeTx.blockTime ?? 0) * 1000).toString(),
+      };
+    }
+
+    return { validationTxDetails, executeTxDetails, msgHash };
+  }
+
+  private async getIncomingMessageHash(
+    sig: Signature,
+    isMainnet: boolean
+  ): Promise<Hex> {
+    const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
+    const chain = isMainnet ? ChainName.Solana : ChainName.SolanaDevnet;
+    const tx = await rpc
+      .getTransaction(sig, {
+        encoding: "jsonParsed",
+        maxSupportedTransactionVersion: 0,
+      })
+      .send();
+    console.log({ tx });
+    if (!tx) {
+      throw new Error("Solana transaction not found");
+    }
+    const { message } = tx.transaction;
+    for (let i = 0; i < message.instructions.length; i++) {
+      const ix = message.instructions[i];
+      if (ix.programId === bridgeProgram[chain]) {
+        if ("data" in ix) {
+          // Msg hash is final 32 bytes of ix.data
+          const encodedData = getBase58Codec().encode(ix.data);
+          console.log({ encodedData });
+          const encodedHash = encodedData.slice(encodedData.length - 32);
+          console.log({ encodedHash });
+          return toHex(encodedHash);
+        }
+      }
+    }
+
+    throw new Error("Message hash not found in solana tx data");
+  }
+
+  async lookupSolanaInitialTx(signature: string): Promise<{
+    initTx?: InitialTxDetails;
+    validationTxDetails?: ValidationTxDetails;
+    executeTxDetails?: ExecuteTxDetails;
+    kind: ResultKind;
+    msgHash?: Hex;
+  }> {
+    const { kind, encodedAcct, transaction, isMainnet } =
+      await this.identifySolanaTx(signature);
 
     if (kind === ResultKind.Message) {
       const acct = decodeOutgoingMessage(encodedAcct) as Account<
@@ -213,7 +263,10 @@ export class SolanaMessageDecoder {
       >;
 
       console.log({ acct });
-      senderAddress = acct.data.sender ?? "";
+      const senderAddress = acct.data.sender ?? "";
+
+      let asset = "";
+      let amount = "0";
 
       if (acct.data.message.__kind === "Transfer") {
         const msg = acct.data.message.fields[0];
@@ -228,28 +281,43 @@ export class SolanaMessageDecoder {
         }
       }
 
-      msgHash = deriveMessageHash(acct);
+      return {
+        initTx: {
+          amount,
+          asset,
+          chain: ChainName.SolanaDevnet,
+          senderAddress,
+          transactionHash: signature,
+          timestamp: new Date(
+            Number(transaction?.blockTime ?? 0) * 1000
+          ).toString(),
+        },
+        kind,
+        msgHash: deriveMessageHash(acct),
+      };
+    } else if (kind === ResultKind.IncomingMessage) {
+      const acct = decodeIncomingMessage(encodedAcct) as Account<
+        IncomingMessage,
+        string
+      >;
+      console.log({ acct });
+      const { validationTxDetails, executeTxDetails, msgHash } =
+        await this.getSolanaDeliveryFromIncomingMessage(acct, isMainnet);
+      return {
+        validationTxDetails,
+        executeTxDetails,
+        kind,
+        msgHash,
+      };
     }
 
-    return {
-      initTx: {
-        amount,
-        asset,
-        chain: ChainName.SolanaDevnet,
-        senderAddress,
-        transactionHash: signature,
-        timestamp: new Date(
-          Number(transaction?.blockTime ?? 0) * 1000
-        ).toString(),
-      },
-      kind,
-      msgHash,
-    };
+    throw new Error("Unable to parse Solana transaction");
   }
 
   private async identifySolanaTx(signature: string) {
     const rpc = this.devnetRpc;
     const chainName = ChainName.SolanaDevnet;
+    const isMainnet = (chainName as any) === ChainName.Solana;
     const transaction = await rpc
       .getTransaction(signature as Signature, {
         encoding: "jsonParsed",
@@ -308,9 +376,26 @@ export class SolanaMessageDecoder {
         console.log({ encodedAcct });
 
         if (this.isOutgoingMessage(encodedAcct)) {
-          return { kind: ResultKind.Message, encodedAcct, transaction };
+          return {
+            kind: ResultKind.Message,
+            encodedAcct,
+            transaction,
+            isMainnet,
+          };
         } else if (this.isOutputRoot(encodedAcct)) {
-          return { kind: ResultKind.OutputRoot, encodedAcct, transaction };
+          return {
+            kind: ResultKind.OutputRoot,
+            encodedAcct,
+            transaction,
+            isMainnet,
+          };
+        } else if (this.isIncomingMessage(encodedAcct)) {
+          return {
+            kind: ResultKind.IncomingMessage,
+            encodedAcct,
+            transaction,
+            isMainnet,
+          };
         }
       }
     }
@@ -324,6 +409,10 @@ export class SolanaMessageDecoder {
 
   private isOutputRoot(acct: MaybeEncodedAccount<string>): boolean {
     return this.isExpectedAccount(acct, getOutputRootDiscriminatorBytes());
+  }
+
+  private isIncomingMessage(acct: MaybeEncodedAccount<string>): boolean {
+    return this.isExpectedAccount(acct, getIncomingMessageDiscriminatorBytes());
   }
 
   private isExpectedAccount(

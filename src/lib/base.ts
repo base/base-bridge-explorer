@@ -84,6 +84,39 @@ export class BaseMessageDecoder {
   });
   private recognizedChainId: number = 0;
 
+  async getBaseInitTxFromMsgHash(
+    msgHash: Hash,
+    isMainnet: boolean
+  ): Promise<InitialTxDetails> {
+    this.recognizedChainId = isMainnet ? base.id : baseSepolia.id;
+    console.log({ msgHash });
+
+    const res = await fetch(
+      `/api/etherscan/logs?chainId=${this.recognizedChainId}&module=logs&action=getLogs&topic0=${MESSAGE_INITIATED_TOPIC}&topic0_1_opr=and&topic1=${msgHash}`
+    );
+
+    if (!res.ok) {
+      throw new Error("Init tx not found");
+    }
+
+    const json = await res.json();
+    console.log({ json });
+    const logs = json.result;
+
+    if (logs.length === 0) {
+      throw new Error("No logs found in init tx receipt");
+    }
+
+    const [log] = logs;
+    const { initTxDetails } = await this.getBaseMessageInfoFromTransactionHash(
+      log.transactionHash
+    );
+    if (!initTxDetails) {
+      throw new Error("Init tx details not found");
+    }
+    return initTxDetails;
+  }
+
   async getBaseMessageInfoFromMsgHash(
     msgHash: Hash,
     isMainnet: boolean

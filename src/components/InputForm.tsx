@@ -80,6 +80,9 @@ export const InputForm = ({
         let initialTx: InitialTxDetails;
         if (!initTxDetails && pubkey) {
           const { initTx } = await solanaDecoder.findSolanaInitTx(pubkey);
+          if (!initTx) {
+            throw new Error("Solana init tx not found");
+          }
           initialTx = initTx;
         } else if (initTxDetails) {
           initialTx = initTxDetails;
@@ -112,23 +115,70 @@ export const InputForm = ({
           initialTx,
           executeTx,
           validationTx,
-          status: executeTxDetails
+          status: executeTx
             ? BridgeStatus.Executed
-            : validationTxDetails
+            : validationTx
             ? BridgeStatus.Validated
             : BridgeStatus.Pending,
         };
         setResult(r);
       } else {
-        const { initTx, kind, msgHash } =
-          await solanaDecoder.lookupSolanaInitialTx(transactionHash.trim());
         const {
-          validationTxDetails: validationTx,
-          executeTxDetails: executeTx,
-        } = await baseDecoder.getBaseMessageInfoFromMsgHash(
+          initTx: initTxDetails,
+          validationTxDetails,
+          executeTxDetails,
+          kind,
           msgHash,
-          initTx.chain === ChainName.Solana
-        );
+        } = await solanaDecoder.lookupSolanaInitialTx(transactionHash.trim());
+
+        let initTx: InitialTxDetails | undefined = initTxDetails;
+        let validationTx: ValidationTxDetails | undefined = validationTxDetails;
+        let executeTx: ExecuteTxDetails | undefined = executeTxDetails;
+
+        if (initTx) {
+          if (validationTxDetails) {
+            throw new Error("Solana tx both init and validation");
+          }
+          if (executeTxDetails) {
+            throw new Error("Solana tx both init and execute");
+          }
+          if (!msgHash) {
+            throw new Error("Solana init tx did not provide msg hash");
+          }
+
+          const { validationTxDetails: v, executeTxDetails: e } =
+            await baseDecoder.getBaseMessageInfoFromMsgHash(
+              msgHash,
+              initTx.chain === ChainName.Solana
+            );
+
+          if (v) {
+            validationTx = v;
+          }
+          if (e) {
+            executeTx = e;
+          }
+        }
+
+        if (validationTxDetails || executeTxDetails) {
+          if (initTx) {
+            throw new Error("Solana tx both init and delivery");
+          }
+          if (!msgHash) {
+            throw new Error("Message hash missing from Solana delivery tx");
+          }
+          let isMainnet = true;
+          if (validationTxDetails) {
+            isMainnet = validationTxDetails.chain === ChainName.Solana;
+          }
+          if (executeTxDetails) {
+            isMainnet = executeTxDetails.chain === ChainName.Solana;
+          }
+          initTx = await baseDecoder.getBaseInitTxFromMsgHash(
+            msgHash,
+            isMainnet
+          );
+        }
 
         const r: BridgeQueryResult = {
           isBridgeRelated: true,
