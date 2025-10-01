@@ -211,7 +211,7 @@ export class BaseMessageDecoder {
 
     const { logs } = receipt;
 
-    let senderAddress = receipt.from;
+    const senderAddress = receipt.from;
 
     for (let i = 0; i < logs.length; i++) {
       const log = logs[i];
