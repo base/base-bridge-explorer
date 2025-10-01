@@ -18,6 +18,7 @@ import {
   SolanaRpcApiMainnet,
 } from "@solana/kit";
 import {
+  BridgeSolanaToBaseStateOutgoingMessageTransfer,
   decodeIncomingMessage,
   decodeOutgoingMessage,
   fetchIncomingMessage,
@@ -41,6 +42,7 @@ import {
   getMint,
   getTokenMetadata,
   TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { formatUnitsString } from "./base";
@@ -285,22 +287,9 @@ export class SolanaMessageDecoder {
           amount = String(Number(msg.amount) / 1_000_000_000);
         } else {
           // Figure out what localToken is
-          const conn = new Connection("https://api.devnet.solana.com");
-          const metadata = await getTokenMetadata(
-            conn,
-            new PublicKey(msg.localToken),
-            "finalized",
-            TOKEN_2022_PROGRAM_ID
-          );
-          const mintInfo = await getMint(
-            conn,
-            new PublicKey(msg.localToken),
-            "finalized",
-            TOKEN_2022_PROGRAM_ID
-          );
-          console.log({ mintInfo });
-          amount = formatUnitsString(String(msg.amount), mintInfo.decimals);
-          asset = metadata?.symbol ?? msg.localToken;
+          const { amount: a, asset: ast } = await this.getSplData(msg);
+          amount = a;
+          asset = ast;
         }
       }
 
@@ -335,6 +324,56 @@ export class SolanaMessageDecoder {
     }
 
     throw new Error("Unable to parse Solana transaction");
+  }
+
+  private async getSplData(
+    msg: BridgeSolanaToBaseStateOutgoingMessageTransfer
+  ) {
+    try {
+      // Figure out what localToken is
+      const conn = new Connection("https://api.devnet.solana.com");
+      const metadata = await getTokenMetadata(
+        conn,
+        new PublicKey(msg.localToken),
+        "finalized",
+        TOKEN_2022_PROGRAM_ID
+      );
+      const mintInfo = await getMint(
+        conn,
+        new PublicKey(msg.localToken),
+        "finalized",
+        TOKEN_2022_PROGRAM_ID
+      );
+      console.log({ mintInfo });
+      const amount = formatUnitsString(String(msg.amount), mintInfo.decimals);
+      const asset = metadata?.symbol ?? msg.localToken;
+      return { amount, asset };
+    } catch {}
+
+    try {
+      // Figure out what localToken is
+      const conn = new Connection("https://api.devnet.solana.com");
+      const metadata = await getTokenMetadata(
+        conn,
+        new PublicKey(msg.localToken),
+        "finalized",
+        TOKEN_PROGRAM_ID
+      );
+      console.log({ metadata });
+      const mintInfo = await getMint(
+        conn,
+        new PublicKey(msg.localToken),
+        "finalized",
+        TOKEN_PROGRAM_ID
+      );
+      console.log({ mintInfo });
+      const amount = formatUnitsString(String(msg.amount), mintInfo.decimals);
+      const asset = msg.localToken;
+      // const asset = metadata?.symbol ?? msg.localToken;
+      return { amount, asset };
+    } catch {}
+
+    throw new Error("SPL data unknown");
   }
 
   private async identifySolanaTx(signature: string) {
