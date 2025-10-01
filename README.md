@@ -1,5 +1,7 @@
 # Base Bridge Explorer Tool
 
+An explorer tool to look up information about cross-chain messages in [Base Bridge](https://github.com/base/bridge). Supports both testnet and mainnet.
+
 ## Quick Start
 
 1. Install dependencies
