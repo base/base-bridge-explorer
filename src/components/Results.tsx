@@ -26,12 +26,14 @@ export const Results = ({ result }: { result: BridgeQueryResult | null }) => {
       {result ? (
         <section className="mt-8 surface rounded-xl p-5 md:p-6 lg:p-7">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold tracking-tight">Result</h2>
-            {result.kind === "output_root" ? (
-              <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset bg-purple-500/15 text-purple-600 dark:text-purple-400 ring-purple-500/20">
-                Output root
-              </span>
-            ) : null}
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-semibold tracking-tight">Result</h2>
+              {result.kind === "output_root" ? (
+                <span className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset bg-purple-500/15 text-purple-600 dark:text-purple-400 ring-purple-500/20">
+                  Output root
+                </span>
+              ) : null}
+            </div>
             <Status result={result} />
           </div>
           <div className="mt-2 text-sm text-[var(--color-muted-foreground)]">
@@ -41,177 +43,237 @@ export const Results = ({ result }: { result: BridgeQueryResult | null }) => {
               ? "This transaction is part of a cross-chain bridge process."
               : "This transaction is not related to the bridge."}
           </div>
+
           {result.isBridgeRelated && result.kind !== "output_root" && (
-            <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
-              <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
-                <h3 className="text-base font-semibold">Initial tx</h3>
-                <div className="mt-3 space-y-2 text-sm">
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Amount transferred
-                    </span>
-                    <div>{result.initialTx?.amount ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Asset
-                    </span>
-                    <div>{result.initialTx?.asset ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Chain
-                    </span>
-                    <div>{result.initialTx?.chain ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Sender Address
-                    </span>
-                    <div className="break-all">
-                      {result.initialTx?.senderAddress ?? "—"}
+            <ol className="mt-6 space-y-4">
+              {/* Initial transaction */}
+              {result.initialTx ? (
+                <li className="relative">
+                  <div
+                    className="absolute left-3 top-3 -ml-px h-[calc(100%+1rem)] w-px bg-white/10 md:left-3.5"
+                    aria-hidden="true"
+                  />
+                  <div className="relative pl-10 md:pl-12">
+                    <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full bg-blue-500/20 ring-2 ring-blue-500/30 text-blue-600 dark:text-blue-400">
+                      <span className="h-2 w-2 rounded-full bg-blue-500" />
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5 transition-shadow hover:shadow-md">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-base font-semibold">
+                          Initial transaction
+                        </h3>
+                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ring-1 ring-inset text-[var(--color-muted-foreground)]">
+                          {result.initialTx.chain}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 text-sm">
+                        <Field label="Amount" value={result.initialTx.amount} />
+                        <Field label="Asset" value={result.initialTx.asset} />
+                        <Field
+                          label="Sender"
+                          value={result.initialTx.senderAddress}
+                          mono
+                          copy
+                        />
+                        <HashField
+                          label="Transaction Hash"
+                          chain={result.initialTx.chain}
+                          hash={result.initialTx.transactionHash}
+                        />
+                        <Field
+                          label="Timestamp"
+                          value={result.initialTx.timestamp}
+                        />
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Transaction Hash
-                    </span>
-                    <div className="break-all">
-                      {result.initialTx?.transactionHash ? (
-                        <a
-                          href={
-                            getExplorerTxUrl(
-                              result.initialTx.chain,
-                              result.initialTx.transactionHash
-                            ) ?? "#"
-                          }
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="underline hover:underline-offset-2"
-                        >
-                          {result.initialTx.transactionHash}
-                        </a>
-                      ) : (
-                        "—"
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Timestamp
-                    </span>
-                    <div>{result.initialTx?.timestamp ?? "—"}</div>
-                  </div>
-                </div>
-              </div>
+                </li>
+              ) : null}
 
-              <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
-                <h3 className="text-base font-semibold">Message validation</h3>
-                <div className="mt-3 space-y-2 text-sm">
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Chain
-                    </span>
-                    <div>{result.validationTx?.chain ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Transaction Hash
-                    </span>
-                    <div className="break-all">
-                      {result.validationTx?.transactionHash ? (
-                        <a
-                          href={
-                            getExplorerTxUrl(
-                              result.validationTx.chain,
-                              result.validationTx.transactionHash
-                            ) ?? "#"
-                          }
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="underline hover:underline-offset-2"
-                        >
-                          {result.validationTx.transactionHash}
-                        </a>
-                      ) : (
-                        "—"
-                      )}
+              {/* Message validation */}
+              {result.validationTx ? (
+                <li className="relative">
+                  <div
+                    className="absolute left-3 top-3 -ml-px h-[calc(100%+1rem)] w-px bg-white/10 md:left-3.5"
+                    aria-hidden="true"
+                  />
+                  <div className="relative pl-10 md:pl-12">
+                    <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full bg-indigo-500/20 ring-2 ring-indigo-500/30 text-indigo-600 dark:text-indigo-400">
+                      <span className="h-2 w-2 rounded-full bg-indigo-500" />
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5 transition-shadow hover:shadow-md">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-base font-semibold">
+                          Message validation
+                        </h3>
+                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ring-1 ring-inset text-[var(--color-muted-foreground)]">
+                          {result.validationTx.chain}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 text-sm">
+                        <HashField
+                          label="Transaction Hash"
+                          chain={result.validationTx.chain}
+                          hash={result.validationTx.transactionHash}
+                        />
+                        <Field
+                          label="Timestamp"
+                          value={result.validationTx.timestamp}
+                        />
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Timestamp
-                    </span>
-                    <div>{result.validationTx?.timestamp ?? "—"}</div>
-                  </div>
-                </div>
-              </div>
+                </li>
+              ) : null}
 
-              <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5">
-                <h3 className="text-base font-semibold">Execute tx</h3>
-                <div className="mt-3 space-y-2 text-sm">
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Amount transferred
-                    </span>
-                    <div>{result.executeTx?.amount ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Asset
-                    </span>
-                    <div>{result.executeTx?.asset ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Chain
-                    </span>
-                    <div>{result.executeTx?.chain ?? "—"}</div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Receiver Address
-                    </span>
-                    <div className="break-all">
-                      {result.executeTx?.receiverAddress ?? "—"}
+              {/* Execute transaction */}
+              {result.executeTx ? (
+                <li className="relative">
+                  <div className="relative pl-10 md:pl-12">
+                    <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full bg-green-500/20 ring-2 ring-green-500/30 text-green-600 dark:text-green-400">
+                      <span className="h-2 w-2 rounded-full bg-green-500" />
+                    </div>
+                    <div className="rounded-lg border border-white/10 bg-white/60 dark:bg-white/5 p-4 md:p-5 transition-shadow hover:shadow-md">
+                      <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-base font-semibold">
+                          Execute transaction
+                        </h3>
+                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ring-1 ring-inset text-[var(--color-muted-foreground)]">
+                          {result.executeTx.chain}
+                        </span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4 text-sm">
+                        <Field label="Amount" value={result.executeTx.amount} />
+                        <Field label="Asset" value={result.executeTx.asset} />
+                        <Field
+                          label="Receiver"
+                          value={result.executeTx.receiverAddress}
+                          mono
+                          copy
+                        />
+                        <HashField
+                          label="Transaction Hash"
+                          chain={result.executeTx.chain}
+                          hash={result.executeTx.transactionHash}
+                        />
+                        <Field
+                          label="Timestamp"
+                          value={result.executeTx.timestamp}
+                        />
+                        {result.executeTx.status ? (
+                          <Field
+                            label="Status"
+                            value={result.executeTx.status}
+                          />
+                        ) : null}
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Transaction Hash
-                    </span>
-                    <div className="break-all">
-                      {result.executeTx?.transactionHash ? (
-                        <a
-                          href={
-                            getExplorerTxUrl(
-                              result.executeTx.chain,
-                              result.executeTx.transactionHash
-                            ) ?? "#"
-                          }
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="underline hover:underline-offset-2"
-                        >
-                          {result.executeTx.transactionHash}
-                        </a>
-                      ) : (
-                        "—"
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <span className="text-[var(--color-muted-foreground)]">
-                      Timestamp
-                    </span>
-                    <div>{result.executeTx?.timestamp ?? "—"}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
+                </li>
+              ) : null}
+            </ol>
           )}
         </section>
       ) : null}
     </>
   );
 };
+
+function Field({
+  label,
+  value,
+  mono,
+  copy,
+}: {
+  label: string;
+  value?: string;
+  mono?: boolean;
+  copy?: boolean;
+}) {
+  const display = value ?? "—";
+  async function handleCopy() {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch (_) {
+      // ignore
+    }
+  }
+  return (
+    <div>
+      <span className="text-[var(--color-muted-foreground)]">{label}</span>
+      <div className={`${mono ? "font-mono text-[13px] break-all" : ""}`}>
+        {display}
+      </div>
+      {copy && value ? (
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="mt-1 inline-flex items-center rounded px-2 py-0.5 text-[11px] ring-1 ring-inset ring-white/15 hover:bg-white/10"
+        >
+          Copy
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function HashField({
+  label,
+  chain,
+  hash,
+}: {
+  label: string;
+  chain: ChainName;
+  hash?: string;
+}) {
+  const href = hash ? getExplorerTxUrl(chain, hash) ?? "#" : undefined;
+  async function handleCopy() {
+    if (!hash) return;
+    try {
+      await navigator.clipboard.writeText(hash);
+    } catch (_) {
+      // ignore
+    }
+  }
+  return (
+    <div>
+      <span className="text-[var(--color-muted-foreground)]">{label}</span>
+      <div className="font-mono text-[13px] break-all">
+        {hash ? (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline hover:underline-offset-2"
+          >
+            {hash}
+          </a>
+        ) : (
+          "—"
+        )}
+      </div>
+      {hash ? (
+        <div className="mt-1 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="inline-flex items-center rounded px-2 py-0.5 text-[11px] ring-1 ring-inset ring-white/15 hover:bg-white/10"
+          >
+            Copy
+          </button>
+          {href && href !== "#" ? (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center rounded px-2 py-0.5 text-[11px] ring-1 ring-inset ring-white/15 hover:bg-white/10"
+            >
+              Explorer
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
