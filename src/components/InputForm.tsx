@@ -106,8 +106,6 @@ export const InputForm = ({
           if (executeTxDetails) {
             executeTx = executeTxDetails;
           }
-        } else {
-          throw new Error("Unable to find Solana delivery");
         }
 
         const r: BridgeQueryResult = {

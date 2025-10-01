@@ -188,6 +188,13 @@ export class SolanaMessageDecoder {
           );
           asset = metadata?.symbol ?? msg.transfer.fields[0].localToken;
           receiverAddress = msg.transfer.fields[0].to;
+        } else if (msg.transfer.__kind === "Sol") {
+          asset = "SOL";
+          receiverAddress = msg.transfer.fields[0].to;
+          amount = formatUnitsString(
+            String(Number(msg.transfer.fields[0].amount)),
+            9
+          );
         } else {
           console.error(
             "Unrecognized IncomingMessage transfer type",
@@ -272,14 +279,28 @@ export class SolanaMessageDecoder {
 
       if (acct.data.message.__kind === "Transfer") {
         const msg = acct.data.message.fields[0];
-        amount = msg.amount.toString();
 
         if (msg.localToken === SOL_ADDRESS) {
           asset = "SOL";
           amount = String(Number(msg.amount) / 1_000_000_000);
         } else {
           // Figure out what localToken is
-          asset = "unknown SPL";
+          const conn = new Connection("https://api.devnet.solana.com");
+          const metadata = await getTokenMetadata(
+            conn,
+            new PublicKey(msg.localToken),
+            "finalized",
+            TOKEN_2022_PROGRAM_ID
+          );
+          const mintInfo = await getMint(
+            conn,
+            new PublicKey(msg.localToken),
+            "finalized",
+            TOKEN_2022_PROGRAM_ID
+          );
+          console.log({ mintInfo });
+          amount = formatUnitsString(String(msg.amount), mintInfo.decimals);
+          asset = metadata?.symbol ?? msg.localToken;
         }
       }
 

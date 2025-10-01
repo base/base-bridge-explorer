@@ -409,8 +409,12 @@ export class BaseMessageDecoder {
           }),
         ];
 
-        let asset = "";
+        let asset: string = localToken;
         let decimals = 18;
+
+        if (asset.toLowerCase() === ethAddress) {
+          asset = "ETH";
+        }
 
         const [block, multicallResults] = await Promise.all(calls);
         const [assetRes, decimalsRes] = multicallResults;
