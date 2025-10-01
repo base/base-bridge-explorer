@@ -11,7 +11,7 @@ export const Header = () => {
         </span>
       </div>
       <h1 className="mt-5 text-4xl md:text-5xl font-semibold tracking-tight">
-        Explore cross-chain transactions
+        Explore Base Bridge Transactions
       </h1>
       <p className="mt-3 text-[15px] text-[var(--color-muted-foreground)]">
         Paste a Solana signature or Base transaction hash to get started.
