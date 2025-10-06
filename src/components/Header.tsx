@@ -14,7 +14,7 @@ export const Header = () => {
         Explore Base Bridge Transactions
       </h1>
       <p className="mt-3 text-[15px] text-[var(--color-muted-foreground)]">
-        Paste a Solana signature or Base transaction hash to get started.
+        Enter a Solana signature or Base transaction hash to explore cross-chain bridge transactions.
       </p>
     </header>
   );

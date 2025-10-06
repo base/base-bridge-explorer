@@ -6,9 +6,9 @@ import {
 } from "./transaction";
 
 export enum BridgeStatus {
-  Pending = "pending",
-  Validated = "pre-validated",
-  Executed = "executed",
+  Pending = "Pending",
+  Validated = "Validated",
+  Executed = "Completed",
 }
 
 export interface BridgeQueryResult {
@@ -18,4 +18,5 @@ export interface BridgeQueryResult {
   executeTx?: ExecuteTxDetails;
   validationTx?: ValidationTxDetails;
   kind?: ResultKind;
+  error?: string;
 }

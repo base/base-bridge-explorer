@@ -37,11 +37,17 @@ export const Results = ({ result }: { result: BridgeQueryResult | null }) => {
             <Status result={result} />
           </div>
           <div className="mt-2 text-sm text-[var(--color-muted-foreground)]">
-            {result.kind === "output_root"
-              ? "We recognize this as an output root transaction. It is not tied to a specific cross-chain message."
-              : result.isBridgeRelated
-              ? "This transaction is part of a cross-chain bridge process."
-              : "This transaction is not related to the bridge."}
+            {result.error ? (
+              <span className="text-red-600 dark:text-red-400">
+                Error: {result.error}
+              </span>
+            ) : result.kind === "output_root" ? (
+              "We recognize this as an output root transaction. It is not tied to a specific cross-chain message."
+            ) : result.isBridgeRelated ? (
+              "This transaction is part of a cross-chain bridge process."
+            ) : (
+              "This transaction is not related to the bridge."
+            )}
           </div>
 
           {result.isBridgeRelated && result.kind !== "output_root" && (
@@ -195,8 +201,8 @@ function Field({
     if (!value) return;
     try {
       await navigator.clipboard.writeText(value);
-    } catch (_) {
-      // ignore
+    } catch (error) {
+      console.error("Failed to copy to clipboard:", error);
     }
   }
   return (
@@ -232,8 +238,8 @@ function HashField({
     if (!hash) return;
     try {
       await navigator.clipboard.writeText(hash);
-    } catch (_) {
-      // ignore
+    } catch (error) {
+      console.error("Failed to copy to clipboard:", error);
     }
   }
   return (

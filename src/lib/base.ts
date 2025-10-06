@@ -22,11 +22,11 @@ import {
 } from "./transaction";
 
 const bridgeAddress: Record<number, Address> = {
-  8453: "0x", // Base Mainnet
+  8453: "0x49048044D57e1C92A77f79988d21Fa8fAF74E97e", // Base Mainnet
   84532: "0xB2068ECCDb908902C76E3f965c1712a9cF64171E", // Base Sepolia
 };
 const bridgeValidatorAddress: Record<number, Address> = {
-  8453: "0x", // Base Mainnet
+  8453: "0x9E6204F750cD866b299594e2aC9eA824E2e5f95c", // Base Mainnet
   84532: "0x8D2cD165360ACF5f0145661a8FB0Ff5D3729Ef9A", // Base Sepolia
 };
 const MESSAGE_SUCCESSFULLY_RELAYED_TOPIC =
@@ -164,7 +164,7 @@ export class BaseMessageDecoder {
     }
 
     let validationTxDetails: ValidationTxDetails;
-    let executeTxDetails: ExecuteTxDetails;
+    let executeTxDetails: ExecuteTxDetails | undefined;
     let pubkey: Hash;
 
     if (validationTx) {
@@ -194,10 +194,14 @@ export class BaseMessageDecoder {
       );
     } else {
       // Get executeTx info from msgHash
-      executeTxDetails = await this.getExecutionTxFromMsgHash(
-        msgHash,
-        isMainnet
-      );
+      try {
+        executeTxDetails = await this.getExecutionTxFromMsgHash(
+          msgHash,
+          isMainnet
+        );
+      } catch (error) {
+        console.log("Execution transaction not found yet:", error);
+      }
     }
 
     return { validationTxDetails, executeTxDetails, pubkey, msgHash };
@@ -285,10 +289,27 @@ export class BaseMessageDecoder {
   }
 
   private async identifyBaseTx(hash: Hash) {
-    const client = this.baseSepoliaClient;
-    this.recognizedChainId = client.chain.id;
-    const receipt = await client.getTransactionReceipt({ hash });
-    console.log({ receipt });
+    // Try Base Sepolia first, then Base Mainnet
+    let receipt: TransactionReceipt;
+    let client;
+
+    try {
+      client = this.baseSepoliaClient;
+      receipt = await client.getTransactionReceipt({ hash });
+      this.recognizedChainId = client.chain.id;
+    } catch (error) {
+      // If not found on Sepolia, try Mainnet
+      try {
+        client = this.baseClient;
+        receipt = await client.getTransactionReceipt({ hash });
+        this.recognizedChainId = client.chain.id;
+      } catch (mainnetError) {
+        console.error("Transaction not found on either network:", { sepoliaError: error, mainnetError });
+        throw new Error("Transaction not found on Base Sepolia or Base Mainnet");
+      }
+    }
+
+    console.log({ receipt, chainId: this.recognizedChainId });
     const { logs } = receipt;
 
     let bridgeSeen = false;
@@ -504,16 +525,16 @@ export class BaseMessageDecoder {
   private isBridgeLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
-        bridgeValidatorAddress[this.recognizedChainId].toLowerCase() ||
+      bridgeValidatorAddress[this.recognizedChainId].toLowerCase() ||
       log.address.toLowerCase() ===
-        bridgeAddress[this.recognizedChainId].toLowerCase()
+      bridgeAddress[this.recognizedChainId].toLowerCase()
     );
   }
 
   private isValidationLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
-        bridgeValidatorAddress[this.recognizedChainId].toLowerCase() &&
+      bridgeValidatorAddress[this.recognizedChainId].toLowerCase() &&
       log.topics[0] === MESSAGE_REGISTERED_TOPIC
     );
   }
@@ -521,7 +542,7 @@ export class BaseMessageDecoder {
   private isExecutionLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
-        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      bridgeAddress[this.recognizedChainId].toLowerCase() &&
       log.topics[0] === MESSAGE_SUCCESSFULLY_RELAYED_TOPIC
     );
   }
@@ -529,7 +550,7 @@ export class BaseMessageDecoder {
   private isTransferInitLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
-        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      bridgeAddress[this.recognizedChainId].toLowerCase() &&
       log.topics[0] === TRANSFER_INITIALIZED_TOPIC
     );
   }
@@ -537,7 +558,7 @@ export class BaseMessageDecoder {
   private isTransferExecutionLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
-        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      bridgeAddress[this.recognizedChainId].toLowerCase() &&
       log.topics[0] === TRANSFER_FINALIZED_TOPIC
     );
   }
@@ -545,7 +566,7 @@ export class BaseMessageDecoder {
   private isMessageInitLog(log: Log): boolean {
     return (
       log.address.toLowerCase() ===
-        bridgeAddress[this.recognizedChainId].toLowerCase() &&
+      bridgeAddress[this.recognizedChainId].toLowerCase() &&
       log.topics[0] === MESSAGE_INITIATED_TOPIC
     );
   }
