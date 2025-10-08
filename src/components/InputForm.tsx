@@ -48,11 +48,11 @@ export const InputForm = ({
 
   const helperText =
     kind === "solana"
-      ? "Detected Solana signature"
+      ? "✓ Valid Solana signature detected"
       : kind === "base"
-      ? "Detected Base transaction hash"
+      ? "✓ Valid Base transaction hash detected"
       : transactionHash
-      ? "Enter a Solana signature (base58) or Base tx hash (0x...)"
+      ? "Please enter a valid Solana signature (base58) or Base transaction hash (0x...)"
       : "";
   const isValid = kind !== "unknown";
 
@@ -196,8 +196,13 @@ export const InputForm = ({
         setResult(r);
       }
     } catch (err) {
-      console.error(err);
-      setResult({ isBridgeRelated: false });
+      console.error("Error exploring transaction:", err);
+      const errorMessage = err instanceof Error ? err.message : "Unknown error occurred";
+      console.error("Detailed error:", errorMessage);
+      setResult({ 
+        isBridgeRelated: false,
+        error: errorMessage
+      });
     } finally {
       setIsLoading(false);
     }
@@ -217,7 +222,7 @@ export const InputForm = ({
           name="query"
           value={transactionHash}
           onChange={(e) => setTransactionHash(e.target.value)}
-          placeholder="e.g. 0x... or 5NTf..."
+          placeholder="Enter transaction hash (0x...) or Solana signature"
           className="w-full h-12 px-4 rounded-md bg-white/70 dark:bg-white/5 outline-none border border-black/10 dark:border-white/10 shadow-sm focus:ring-4 focus:ring-[color:var(--brand)]/30"
           autoComplete="off"
           spellCheck={false}

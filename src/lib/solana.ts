@@ -56,8 +56,8 @@ export enum ResultKind {
 const SOL_ADDRESS = "SoL1111111111111111111111111111111111111111";
 
 const bridgeProgram = {
-  [ChainName.Solana]: "",
-  [ChainName.SolanaDevnet]: "HSvNvzehozUpYhRBuCKq3Fq8udpRocTmGMUYXmCSiCCc",
+  [ChainName.Solana]: "BridgE2VxKUJG3XW8TDEY8nZNDthvVFNwYs6Jd5sTp5u", // Solana Mainnet
+  [ChainName.SolanaDevnet]: "HSvNvzehozUpYhRBuCKq3Fq8udpRocTmGMUYXmCSiCCc", // Solana Devnet
 };
 
 function bytes32ToPubkey(inp: string): Address {
@@ -165,7 +165,11 @@ export class SolanaMessageDecoder {
 
       if (msg.__kind === "Transfer") {
         if (msg.transfer.__kind === "WrappedToken") {
-          const conn = new Connection("https://api.devnet.solana.com");
+          const conn = new Connection(
+            isMainnet 
+              ? "https://api.mainnet-beta.solana.com" 
+              : "https://api.devnet.solana.com"
+          );
           const mintPk = new PublicKey(msg.transfer.fields[0].localToken);
           const metadata = await getTokenMetadata(
             conn,

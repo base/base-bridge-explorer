@@ -12,13 +12,20 @@ npm install
 
 2. Acquire an [Etherscan API Key](https://etherscan.io/apis)
 
-3. Create a `.env.local` file to store API key
+3. Create a `.env.local` file from the example template
 
-```env
-ETHERSCAN_API_KEY=<your api key>
+```bash
+cp .env.example .env.local
 ```
 
-4. Run the app
+4. Edit `.env.local` and add your API key
+
+```env
+ETHERSCAN_API_KEY=your_actual_api_key_here
+NEXT_PUBLIC_NETWORK=testnet
+```
+
+5. Run the app
 
 ```bash
 npm run dev
@@ -30,4 +37,17 @@ pnpm dev
 bun dev
 ```
 
-5. Visit [localhost:3000](http://localhost:3000/) in your browser
+6. Visit [localhost:3000](http://localhost:3000/) in your browser
+
+## Features
+
+- Explore cross-chain bridge transactions between Base and Solana
+- Support for both mainnet and testnet networks
+- Real-time transaction status tracking
+- Detailed transaction information display
+- User-friendly interface with proper error handling
+
+## Supported Networks
+
+- **Base Mainnet** and **Base Sepolia** (testnet)
+- **Solana Mainnet** and **Solana Devnet** (testnet)

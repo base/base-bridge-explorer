@@ -18,9 +18,12 @@ export async function GET(req: NextRequest) {
   const actionParam = searchParams.get("action") ?? "getLogs";
 
   const apiKey = process.env.ETHERSCAN_API_KEY;
-  if (!apiKey) {
+  if (!apiKey || apiKey === "your_etherscan_api_key_here") {
     return NextResponse.json(
-      { error: "Server misconfiguration: ETHERSCAN_API_KEY is not set" },
+      { 
+        error: "Etherscan API key not configured. Please set ETHERSCAN_API_KEY in your .env.local file.",
+        details: "Get your API key from https://etherscan.io/apis"
+      },
       { status: 500 }
     );
   }
@@ -65,6 +68,7 @@ export async function GET(req: NextRequest) {
     const data = await upstreamRes.json();
     return NextResponse.json(data, { status: upstreamRes.status });
   } catch (error) {
+    console.error("Failed to fetch from upstream explorer:", error);
     return NextResponse.json(
       { error: "Failed to fetch from upstream explorer" },
       { status: 502 }
