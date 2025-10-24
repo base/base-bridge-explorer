@@ -70,12 +70,26 @@ function bytes32ToPubkey(inp: string): Address {
 }
 
 export class SolanaMessageDecoder {
+  private solanaMainnetUrl: string;
+  private solanaDevnetUrl: string;
+
   private mainnetRpc: RpcMainnet<SolanaRpcApiMainnet>;
   private devnetRpc: RpcDevnet<SolanaRpcApiDevnet>;
 
   constructor() {
-    const mainnetUrl = mainnet("https://api.mainnet-beta.solana.com");
-    const devnetUrl = devnet("https://api.devnet.solana.com");
+    this.solanaMainnetUrl = process.env.SOLANA_MAINNET_RPC || "";
+    this.solanaDevnetUrl = process.env.SOLANA_DEVNET_RPC || "";
+
+    if (!this.solanaMainnetUrl) {
+      throw new Error("Missing solana mainnet url");
+    }
+
+    if (!this.solanaDevnetUrl) {
+      throw new Error("Missing solana devnet url");
+    }
+
+    const mainnetUrl = mainnet(this.solanaMainnetUrl);
+    const devnetUrl = devnet(this.solanaDevnetUrl);
     this.mainnetRpc = createSolanaRpc(mainnetUrl);
     this.devnetRpc = createSolanaRpc(devnetUrl);
   }
@@ -165,7 +179,9 @@ export class SolanaMessageDecoder {
 
       if (msg.__kind === "Transfer") {
         if (msg.transfer.__kind === "WrappedToken") {
-          const conn = new Connection("https://api.devnet.solana.com");
+          const conn = new Connection(
+            isMainnet ? this.solanaMainnetUrl : this.solanaDevnetUrl
+          );
           const mintPk = new PublicKey(msg.transfer.fields[0].localToken);
           const metadata = await getTokenMetadata(
             conn,
@@ -287,7 +303,10 @@ export class SolanaMessageDecoder {
           amount = String(Number(msg.amount) / 1_000_000_000);
         } else {
           // Figure out what localToken is
-          const { amount: a, asset: ast } = await this.getSplData(msg);
+          const { amount: a, asset: ast } = await this.getSplData(
+            msg,
+            isMainnet
+          );
           amount = a;
           asset = ast;
         }
@@ -327,11 +346,14 @@ export class SolanaMessageDecoder {
   }
 
   private async getSplData(
-    msg: BridgeSolanaToBaseStateOutgoingMessageTransfer
+    msg: BridgeSolanaToBaseStateOutgoingMessageTransfer,
+    isMainnet: boolean
   ) {
     try {
       // Figure out what localToken is
-      const conn = new Connection("https://api.devnet.solana.com");
+      const conn = new Connection(
+        isMainnet ? this.solanaMainnetUrl : this.solanaDevnetUrl
+      );
       const metadata = await getTokenMetadata(
         conn,
         new PublicKey(msg.localToken),
@@ -352,7 +374,9 @@ export class SolanaMessageDecoder {
 
     try {
       // Figure out what localToken is
-      const conn = new Connection("https://api.devnet.solana.com");
+      const conn = new Connection(
+        isMainnet ? this.solanaMainnetUrl : this.solanaDevnetUrl
+      );
       const metadata = await getTokenMetadata(
         conn,
         new PublicKey(msg.localToken),
@@ -377,6 +401,7 @@ export class SolanaMessageDecoder {
   }
 
   private async identifySolanaTx(signature: string) {
+    // TODO: select correct rpc
     const rpc = this.devnetRpc;
     const chainName = ChainName.SolanaDevnet;
     const isMainnet = (chainName as any) === ChainName.Solana;

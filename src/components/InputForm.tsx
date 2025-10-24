@@ -62,7 +62,6 @@ export const InputForm = ({
     }
 
     const baseDecoder = new BaseMessageDecoder();
-    const solanaDecoder = new SolanaMessageDecoder();
 
     try {
       setIsLoading(true);
@@ -79,11 +78,16 @@ export const InputForm = ({
 
         let initialTx: InitialTxDetails;
         if (!initTxDetails && pubkey) {
-          const { initTx } = await solanaDecoder.findSolanaInitTx(pubkey);
-          if (!initTx) {
-            throw new Error("Solana init tx not found");
+          const res = await fetch(
+            `/api/solana/initTxFromPubkey?pubkey=${pubkey}`
+          );
+          if (!res.ok) {
+            console.error(res);
+            throw new Error("Error from initTxFromPubkey endpoint");
           }
-          initialTx = initTx;
+          const json = await res.json();
+          console.log({ json });
+          initialTx = json;
         } else if (initTxDetails) {
           initialTx = initTxDetails;
         } else {
@@ -95,11 +99,16 @@ export const InputForm = ({
         if (initTxDetails && msgHash) {
           // Find Solana delivery
           const isMainnet = initTxDetails.chain === ChainName.Base;
-          const { validationTxDetails, executeTxDetails } =
-            await solanaDecoder.findSolanaDeliveryFromMsgHash(
-              msgHash,
-              isMainnet
-            );
+          const res = await fetch(
+            `/api/solana/deliveryFromMsgHash?msgHash=${msgHash}&isMainnet=${isMainnet}`
+          );
+          if (!res.ok) {
+            console.error(res);
+            throw new Error("Error from deliveryFromMsgHash endpoint");
+          }
+          const json = await res.json();
+          console.log({ json });
+          const { validationTxDetails, executeTxDetails } = json;
           if (validationTxDetails) {
             validationTx = validationTxDetails;
           }
@@ -121,13 +130,22 @@ export const InputForm = ({
         };
         setResult(r);
       } else {
+        const res = await fetch(
+          `/api/solana/txFromTxSignature?signature=${transactionHash.trim()}`
+        );
+        if (!res.ok) {
+          console.error("res");
+          throw new Error("Error from txFromTxSignature endpoint");
+        }
+        const json = await res.json();
+        console.log({ json });
         const {
           initTx: initTxDetails,
           validationTxDetails,
           executeTxDetails,
           kind,
           msgHash,
-        } = await solanaDecoder.lookupSolanaInitialTx(transactionHash.trim());
+        } = json;
 
         let initTx: InitialTxDetails | undefined = initTxDetails;
         let validationTx: ValidationTxDetails | undefined = validationTxDetails;
