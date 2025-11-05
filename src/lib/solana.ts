@@ -35,6 +35,10 @@ import {
   parseBridgeSplInstruction,
   getBridgeWrappedTokenDiscriminatorBytes,
   parseBridgeWrappedTokenInstruction,
+  getProveMessageDiscriminatorBytes,
+  parseProveMessageInstruction,
+  getProveMessageBufferedDiscriminatorBytes,
+  parseProveMessageBufferedInstruction,
   IncomingMessage,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
@@ -85,16 +89,10 @@ export class SolanaMessageDecoder {
   private devnetRpc: RpcDevnet<SolanaRpcApiDevnet>;
 
   constructor() {
-    this.solanaMainnetUrl = process.env.SOLANA_MAINNET_RPC || "";
-    this.solanaDevnetUrl = process.env.SOLANA_DEVNET_RPC || "";
-
-    if (!this.solanaMainnetUrl) {
-      throw new Error("Missing solana mainnet url");
-    }
-
-    if (!this.solanaDevnetUrl) {
-      throw new Error("Missing solana devnet url");
-    }
+    this.solanaMainnetUrl =
+      process.env.SOLANA_MAINNET_RPC || "https://api.mainnet-beta.solana.com";
+    this.solanaDevnetUrl =
+      process.env.SOLANA_DEVNET_RPC || "https://api.devnet.solana.com";
 
     const mainnetUrl = mainnet(this.solanaMainnetUrl);
     const devnetUrl = devnet(this.solanaDevnetUrl);
@@ -504,10 +502,9 @@ export class SolanaMessageDecoder {
                 accounts: metas,
                 data,
               } as any);
-              const omMeta = (parsed.accounts?.outgoingMessage ?? undefined) as
-                | { address?: string }
-                | string
-                | undefined;
+              const omMeta = (parsed.accounts?.outgoingMessage ??
+                parsed.accounts?.message ??
+                undefined) as { address?: string } | string | undefined;
               const omAddr =
                 typeof omMeta === "string" ? omMeta : omMeta?.address;
               return omAddr;
@@ -533,6 +530,17 @@ export class SolanaMessageDecoder {
               parseBridgeWrappedTokenInstruction
             );
 
+          // Also detect proveMessage and proveMessageBuffered (incoming message)
+          const incomingMessageAddr =
+            tryMatch(
+              getProveMessageDiscriminatorBytes(),
+              parseProveMessageInstruction
+            ) ||
+            tryMatch(
+              getProveMessageBufferedDiscriminatorBytes(),
+              parseProveMessageBufferedInstruction
+            );
+
           if (outgoingMessageAddr) {
             const encodedAcct = await fetchEncodedAccount(
               rpc,
@@ -541,6 +549,19 @@ export class SolanaMessageDecoder {
             if (this.isOutgoingMessage(encodedAcct)) {
               return {
                 kind: ResultKind.Message,
+                encodedAcct,
+                transaction,
+                isMainnet,
+              };
+            }
+          } else if (incomingMessageAddr) {
+            const encodedAcct = await fetchEncodedAccount(
+              rpc,
+              address(incomingMessageAddr)
+            );
+            if (this.isIncomingMessage(encodedAcct)) {
+              return {
+                kind: ResultKind.IncomingMessage,
                 encodedAcct,
                 transaction,
                 isMainnet,

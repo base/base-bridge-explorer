@@ -13,7 +13,15 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const solanaDecoder = new SolanaMessageDecoder();
-  const res = await solanaDecoder.lookupSolanaInitialTx(signature);
-  return NextResponse.json(res, { status: 200 });
+  try {
+    const solanaDecoder = new SolanaMessageDecoder();
+    const res = await solanaDecoder.lookupSolanaInitialTx(signature);
+    return NextResponse.json(res, { status: 200 });
+  } catch (e: any) {
+    console.error("txFromTxSignature error:", e);
+    return NextResponse.json(
+      { error: e?.message ?? "Internal server error" },
+      { status: 500 }
+    );
+  }
 }
