@@ -27,6 +27,14 @@ import {
   getOutgoingMessageDiscriminatorBytes,
   getOutputRootDiscriminatorBytes,
   getRelayMessageDiscriminatorBytes,
+  getBridgeSolDiscriminatorBytes,
+  parseBridgeSolInstruction,
+  getBridgeSolWithBufferedCallDiscriminatorBytes,
+  parseBridgeSolWithBufferedCallInstruction,
+  getBridgeSplDiscriminatorBytes,
+  parseBridgeSplInstruction,
+  getBridgeWrappedTokenDiscriminatorBytes,
+  parseBridgeWrappedTokenInstruction,
   IncomingMessage,
   OutgoingMessage,
 } from "../../clients/ts/src/bridge";
@@ -260,12 +268,14 @@ export class SolanaMessageDecoder {
       const ix = message.instructions[i];
       if (ix.programId === bridgeProgram[chain]) {
         if ("data" in ix) {
-          // Msg hash is final 32 bytes of ix.data
-          const encodedData = getBase58Codec().encode(ix.data);
-          console.log({ encodedData });
-          const encodedHash = encodedData.slice(encodedData.length - 32);
-          console.log({ encodedHash });
-          return toHex(encodedHash);
+          // Msg hash is final 32 bytes of instruction data (base58 string -> bytes)
+          const raw = (ix as any).data as string | Uint8Array;
+          const bytes =
+            typeof raw === "string"
+              ? getBase58Codec().encode(raw)
+              : (raw as Uint8Array);
+          const hashBytes = bytes.slice(bytes.length - 32);
+          return toHex(hashBytes);
         }
       }
     }
@@ -445,6 +455,101 @@ export class SolanaMessageDecoder {
             }
           }
         }
+
+        // Fallback: detect initial bridge instructions without relying on innerInstructions
+        try {
+          const rawIxData = (ix as any).data as string | Uint8Array | undefined;
+          if (!rawIxData) {
+            // If this instruction is fully parsed and has no raw data, skip
+            throw new Error("No raw data on instruction");
+          }
+          const data =
+            typeof rawIxData === "string"
+              ? getBase58Codec().encode(rawIxData)
+              : (rawIxData as Uint8Array);
+
+          // Normalize accounts to AccountMeta[] expected by parse*Instruction helpers
+          const accountKeys = (message as any)?.accountKeys ?? [];
+          const metas =
+            (ix as any).accounts?.map((acct: any) => {
+              let pubkeyStr: string | undefined;
+              if (typeof acct === "string") pubkeyStr = acct;
+              else if (typeof acct === "number") {
+                const entry = accountKeys[acct];
+                pubkeyStr = entry?.pubkey ?? entry?.address;
+              } else if (acct && typeof acct === "object") {
+                pubkeyStr = (acct.pubkey ?? acct.address) as string | undefined;
+              }
+              const keyInfo =
+                accountKeys.find(
+                  (k: any) => (k.pubkey ?? k.address) === pubkeyStr
+                ) ?? {};
+              return {
+                address: pubkeyStr,
+                isSigner: Boolean(keyInfo.signer),
+                isWritable: Boolean(keyInfo.writable),
+              } as any;
+            }) ?? [];
+
+          const tryMatch = (
+            discriminator: ReadonlyUint8Array,
+            parseFn: (instruction: any) => { accounts: any }
+          ): string | undefined => {
+            if (
+              data.length >= discriminator.length &&
+              discriminator.every((b, k) => data[k] === b)
+            ) {
+              const parsed = parseFn({
+                programAddress: ix.programId,
+                accounts: metas,
+                data,
+              } as any);
+              const omMeta = (parsed.accounts?.outgoingMessage ?? undefined) as
+                | { address?: string }
+                | string
+                | undefined;
+              const omAddr =
+                typeof omMeta === "string" ? omMeta : omMeta?.address;
+              return omAddr;
+            }
+            return undefined;
+          };
+
+          const outgoingMessageAddr =
+            tryMatch(
+              getBridgeSolDiscriminatorBytes(),
+              parseBridgeSolInstruction
+            ) ||
+            tryMatch(
+              getBridgeSolWithBufferedCallDiscriminatorBytes(),
+              parseBridgeSolWithBufferedCallInstruction
+            ) ||
+            tryMatch(
+              getBridgeSplDiscriminatorBytes(),
+              parseBridgeSplInstruction
+            ) ||
+            tryMatch(
+              getBridgeWrappedTokenDiscriminatorBytes(),
+              parseBridgeWrappedTokenInstruction
+            );
+
+          if (outgoingMessageAddr) {
+            const encodedAcct = await fetchEncodedAccount(
+              rpc,
+              address(outgoingMessageAddr)
+            );
+            if (this.isOutgoingMessage(encodedAcct)) {
+              return {
+                kind: ResultKind.Message,
+                encodedAcct,
+                transaction,
+                isMainnet,
+              };
+            }
+          }
+        } catch (e) {
+          // Ignore and continue; we'll try other strategies below.
+        }
       }
     }
 
@@ -525,7 +630,12 @@ export class SolanaMessageDecoder {
 
   private isRelayMessageCall(ix: any): boolean {
     const d = getRelayMessageDiscriminatorBytes();
-    const data = getBase58Codec().encode(ix.data);
+    const rawIxData = (ix as any).data as string | Uint8Array | undefined;
+    if (!rawIxData) return false;
+    const data =
+      typeof rawIxData === "string"
+        ? getBase58Codec().encode(rawIxData)
+        : (rawIxData as Uint8Array);
     return data.length >= d.length && d.every((byte, i) => data[i] === byte);
   }
 
