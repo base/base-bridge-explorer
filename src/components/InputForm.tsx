@@ -3,7 +3,6 @@
 import { Dispatch, SetStateAction, useMemo, useState } from "react";
 import { ExploreButton } from "./ExploreButton";
 import { BaseMessageDecoder } from "@/lib/base";
-import { SolanaMessageDecoder } from "@/lib/solana";
 import { Hash } from "viem";
 import { BridgeQueryResult, BridgeStatus } from "@/lib/bridge";
 import {
@@ -72,9 +71,19 @@ export const InputForm = ({
           executeTxDetails,
           pubkey,
           msgHash,
+          txContainer,
         } = await baseDecoder.getBaseMessageInfoFromTransactionHash(
           transactionHash.trim() as Hash
         );
+
+        if (txContainer && !initTxDetails) {
+          const r: BridgeQueryResult = {
+            isBridgeRelated: true,
+            txContainer,
+          };
+          setResult(r);
+          return;
+        }
 
         let initialTx: InitialTxDetails;
         if (!initTxDetails && pubkey) {

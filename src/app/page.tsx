@@ -16,7 +16,7 @@ export default function Home() {
 
         <InputForm setResult={setResult} />
 
-        <Results result={result} />
+        <Results result={result} setResult={setResult} />
       </main>
     </div>
   );

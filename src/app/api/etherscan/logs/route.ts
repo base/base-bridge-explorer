@@ -65,10 +65,10 @@ export async function GET(req: NextRequest) {
     const data = await upstreamRes.json();
     return NextResponse.json(data, { status: upstreamRes.status });
   } catch (error) {
+    console.error(error);
     return NextResponse.json(
       { error: "Failed to fetch from upstream explorer" },
       { status: 502 }
     );
   }
 }
-

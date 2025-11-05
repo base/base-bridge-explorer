@@ -20,6 +20,7 @@ import {
   InitialTxDetails,
   ValidationTxDetails,
 } from "./transaction";
+import { BaseTxContainer, TxMessageRef } from "./bridge";
 
 const bridgeAddress: Record<number, Address> = {
   8453: "0x", // Base Mainnet
@@ -123,10 +124,11 @@ export class BaseMessageDecoder {
   ): Promise<{
     validationTxDetails: ValidationTxDetails;
     executeTxDetails: ExecuteTxDetails;
+    pubkey: Hex;
   }> {
     this.recognizedChainId = isMainnet ? base.id : baseSepolia.id;
 
-    const { validationTx } = await this.getValidationTxFromMsgHash(
+    const { validationTx, pubkey } = await this.getValidationTxFromMsgHash(
       msgHash,
       isMainnet
     );
@@ -134,7 +136,11 @@ export class BaseMessageDecoder {
       msgHash,
       isMainnet
     );
-    return { validationTxDetails: validationTx, executeTxDetails: executionTx };
+    return {
+      validationTxDetails: validationTx,
+      executeTxDetails: executionTx,
+      pubkey,
+    };
   }
 
   async getBaseMessageInfoFromTransactionHash(hash: Hash): Promise<{
@@ -143,6 +149,7 @@ export class BaseMessageDecoder {
     executeTxDetails?: ExecuteTxDetails;
     pubkey?: Hex;
     msgHash?: Hex;
+    txContainer?: BaseTxContainer;
   }> {
     // If this returns without erroring, we know the tx is part of a bridge interaction
     const { validationTx, executeTx, messageInit, receipt, client } =
@@ -162,45 +169,62 @@ export class BaseMessageDecoder {
       const initTx = await this.getInitTxFromReceipt(receipt, isMainnet);
       return { initTxDetails: initTx, msgHash };
     }
-
-    let validationTxDetails: ValidationTxDetails;
-    let executeTxDetails: ExecuteTxDetails;
-    let pubkey: Hash;
-
-    if (validationTx) {
-      // Get validationTx info from receipt
-      const block = await client.getBlock({ blockHash: receipt.blockHash });
-      pubkey = this.extractPubkeyFromReceipt(receipt);
-      validationTxDetails = {
-        chain: client.chain.name as ChainName,
-        transactionHash: hash,
-        timestamp: new Date(Number(block.timestamp) * 1000).toString(),
-      };
-    } else {
-      // Get validationTx info from msgHash
-      const { validationTx, pubkey: p } = await this.getValidationTxFromMsgHash(
-        msgHash,
-        isMainnet
-      );
-      validationTxDetails = validationTx;
-      pubkey = p;
-    }
-
-    if (executeTx) {
-      // Get executeTx info from receipt
-      executeTxDetails = await this.getExecutionTxFromReceipt(
+    // Destination-chain tx: treat as container of many messages
+    if (validationTx || executeTx) {
+      const txContainer = await this.buildTxContainerFromReceipt(
         receipt,
-        isMainnet
+        client
       );
-    } else {
-      // Get executeTx info from msgHash
-      executeTxDetails = await this.getExecutionTxFromMsgHash(
-        msgHash,
-        isMainnet
-      );
+      return { txContainer };
     }
 
-    return { validationTxDetails, executeTxDetails, pubkey, msgHash };
+    throw new Error("Unrecognized bridge transaction type");
+  }
+
+  private async buildTxContainerFromReceipt(
+    receipt: TransactionReceipt,
+    client: {
+      chain: { id: number; name: string };
+      getBlock: (args: { blockHash: Hash }) => Promise<{ timestamp: bigint }>;
+    }
+  ): Promise<BaseTxContainer> {
+    const block = await client.getBlock({ blockHash: receipt.blockHash });
+    const preValidated: TxMessageRef[] = [];
+    const executed: TxMessageRef[] = [];
+
+    for (let i = 0; i < receipt.logs.length; i++) {
+      const log = receipt.logs[i];
+      if (this.isValidationLog(log)) {
+        const decodedData = decodeEventLog({
+          abi: BridgeValidator,
+          data: log.data,
+          topics: log.topics,
+        }) as {
+          eventName: "MessageRegistered";
+          args: {
+            messageHash: `0x${string}`;
+          };
+        };
+        preValidated.push({
+          messageHash: decodedData.args.messageHash,
+          logIndex: Number(log.logIndex ?? i),
+        });
+      } else if (this.isExecutionLog(log)) {
+        const msgHash = (log.topics?.[2] ?? "0x") as Hex;
+        executed.push({
+          messageHash: msgHash,
+          logIndex: Number(log.logIndex ?? i),
+        });
+      }
+    }
+
+    return {
+      chain: client.chain.name as string,
+      txHash: receipt.transactionHash,
+      timestamp: new Date(Number(block.timestamp) * 1000).toString(),
+      preValidated,
+      executed,
+    };
   }
 
   private async getInitTxFromReceipt(
@@ -286,13 +310,20 @@ export class BaseMessageDecoder {
 
   private async identifyBaseTx(hash: Hash) {
     // Try Base mainnet first, then Base Sepolia
-    let client = this.baseClient;
+    let client: {
+      chain: { id: number; name: string };
+      getTransactionReceipt: (args: {
+        hash: Hash;
+      }) => Promise<TransactionReceipt>;
+      getBlock: (args: { blockHash: Hash }) => Promise<{ timestamp: bigint }>;
+    } = this.baseClient as any;
     let receipt: TransactionReceipt | undefined;
     try {
       receipt = await client.getTransactionReceipt({ hash });
       this.recognizedChainId = client.chain.id;
     } catch (e) {
-      client = this.baseSepoliaClient;
+      console.error(e);
+      client = this.baseSepoliaClient as any;
       receipt = await client.getTransactionReceipt({ hash });
       this.recognizedChainId = client.chain.id;
     }

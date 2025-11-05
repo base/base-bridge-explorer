@@ -273,7 +273,9 @@ export class SolanaMessageDecoder {
       const raw = (ix as any).data as string | Uint8Array | undefined;
       if (!raw) continue;
       const bytes =
-        typeof raw === "string" ? getBase58Codec().encode(raw) : (raw as Uint8Array);
+        typeof raw === "string"
+          ? getBase58Codec().encode(raw)
+          : (raw as Uint8Array);
       if (bytes.length < 32) continue;
       if (
         discriminators.some(
@@ -511,8 +513,10 @@ export class SolanaMessageDecoder {
           discriminator: ReadonlyUint8Array,
           parseFn: (instruction: any) => { accounts: any }
         ): string | undefined => {
-          if (data.length >= discriminator.length &&
-            discriminator.every((b, k) => data[k] === b)) {
+          if (
+            data.length >= discriminator.length &&
+            discriminator.every((b, k) => data[k] === b)
+          ) {
             const parsed = parseFn({
               programAddress: ix.programId,
               accounts: metas,
@@ -521,7 +525,8 @@ export class SolanaMessageDecoder {
             const omMeta = (parsed.accounts?.outgoingMessage ??
               parsed.accounts?.message ??
               undefined) as { address?: string } | string | undefined;
-            const omAddr = typeof omMeta === "string" ? omMeta : omMeta?.address;
+            const omAddr =
+              typeof omMeta === "string" ? omMeta : omMeta?.address;
             return omAddr;
           }
           return undefined;
@@ -586,7 +591,7 @@ export class SolanaMessageDecoder {
           }
         }
       } catch (e) {
-        // Ignore and continue; we'll try other strategies below.
+        console.error(e);
       }
     }
 
@@ -625,21 +630,21 @@ export class SolanaMessageDecoder {
             kind: ResultKind.Message,
             encodedAcct,
             transaction,
-            isMainnet,
+            isMainnet: chainName === ChainName.Solana,
           };
         } else if (this.isOutputRoot(encodedAcct)) {
           return {
             kind: ResultKind.OutputRoot,
             encodedAcct,
             transaction,
-            isMainnet,
+            isMainnet: chainName === ChainName.Solana,
           };
         } else if (this.isIncomingMessage(encodedAcct)) {
           return {
             kind: ResultKind.IncomingMessage,
             encodedAcct,
             transaction,
-            isMainnet,
+            isMainnet: chainName === ChainName.Solana,
           };
         }
       }

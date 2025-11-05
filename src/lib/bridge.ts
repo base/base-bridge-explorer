@@ -11,6 +11,19 @@ export enum BridgeStatus {
   Executed = "executed",
 }
 
+export interface TxMessageRef {
+  messageHash: string;
+  logIndex: number;
+}
+
+export interface BaseTxContainer {
+  chain: string; // use ChainName for display; keep as string to avoid circular import
+  txHash: string;
+  timestamp: string;
+  preValidated: TxMessageRef[];
+  executed: TxMessageRef[];
+}
+
 export interface BridgeQueryResult {
   isBridgeRelated: boolean;
   status?: BridgeStatus;
@@ -18,4 +31,5 @@ export interface BridgeQueryResult {
   executeTx?: ExecuteTxDetails;
   validationTx?: ValidationTxDetails;
   kind?: ResultKind;
+  txContainer?: BaseTxContainer;
 }
