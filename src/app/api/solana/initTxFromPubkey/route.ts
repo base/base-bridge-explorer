@@ -7,6 +7,7 @@ export async function GET(req: NextRequest) {
   const searchParams = url.searchParams;
 
   const pubkey = searchParams.get("pubkey");
+  const isMainnet = searchParams.get("isMainnet") === "true";
   if (!pubkey) {
     return NextResponse.json(
       { error: "Missing required parameter: pubkey" },
@@ -15,7 +16,10 @@ export async function GET(req: NextRequest) {
   }
 
   const solanaDecoder = new SolanaMessageDecoder();
-  const { initTx } = await solanaDecoder.findSolanaInitTx(pubkey as Hex);
+  const { initTx } = await solanaDecoder.findSolanaInitTx(
+    pubkey as Hex,
+    isMainnet
+  );
   if (!initTx) {
     return NextResponse.json(
       { error: "Solana init tx not found" },

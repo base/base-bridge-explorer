@@ -100,9 +100,9 @@ export class SolanaMessageDecoder {
     this.devnetRpc = createSolanaRpc(devnetUrl);
   }
 
-  async findSolanaInitTx(pubkeyHex: Hex) {
+  async findSolanaInitTx(pubkeyHex: Hex, isMainnet: boolean) {
     const pubkey = bytes32ToPubkey(pubkeyHex);
-    const rpc = this.devnetRpc;
+    const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
 
     const outgoingMessage = await fetchOutgoingMessage(rpc, pubkey);
     console.log({ outgoingMessage });
@@ -250,7 +250,6 @@ export class SolanaMessageDecoder {
     isMainnet: boolean
   ): Promise<Hex> {
     const rpc = isMainnet ? this.mainnetRpc : this.devnetRpc;
-    const chain = isMainnet ? ChainName.Solana : ChainName.SolanaDevnet;
     const tx = await rpc
       .getTransaction(sig, {
         encoding: "jsonParsed",
@@ -262,19 +261,27 @@ export class SolanaMessageDecoder {
       throw new Error("Solana transaction not found");
     }
     const { message } = tx.transaction;
+
+    const discriminators = [
+      getProveMessageDiscriminatorBytes(),
+      getProveMessageBufferedDiscriminatorBytes(),
+      getRelayMessageDiscriminatorBytes(),
+    ];
+
     for (let i = 0; i < message.instructions.length; i++) {
       const ix = message.instructions[i];
-      if (ix.programId === bridgeProgram[chain]) {
-        if ("data" in ix) {
-          // Msg hash is final 32 bytes of instruction data (base58 string -> bytes)
-          const raw = (ix as any).data as string | Uint8Array;
-          const bytes =
-            typeof raw === "string"
-              ? getBase58Codec().encode(raw)
-              : (raw as Uint8Array);
-          const hashBytes = bytes.slice(bytes.length - 32);
-          return toHex(hashBytes);
-        }
+      const raw = (ix as any).data as string | Uint8Array | undefined;
+      if (!raw) continue;
+      const bytes =
+        typeof raw === "string" ? getBase58Codec().encode(raw) : (raw as Uint8Array);
+      if (bytes.length < 32) continue;
+      if (
+        discriminators.some(
+          (d) => bytes.length >= d.length && d.every((b, k) => bytes[k] === b)
+        )
+      ) {
+        const hashBytes = bytes.slice(bytes.length - 32);
+        return toHex(hashBytes);
       }
     }
 
@@ -409,16 +416,26 @@ export class SolanaMessageDecoder {
   }
 
   private async identifySolanaTx(signature: string) {
-    // TODO: select correct rpc
-    const rpc = this.devnetRpc;
-    const chainName = ChainName.SolanaDevnet;
-    const isMainnet = (chainName as any) === ChainName.Solana;
-    const transaction = await rpc
-      .getTransaction(signature as Signature, {
-        encoding: "jsonParsed",
-        maxSupportedTransactionVersion: 0,
-      })
-      .send();
+    // Try mainnet first, fall back to devnet
+    const tryFetch = async (
+      rpc: RpcMainnet<SolanaRpcApiMainnet> | RpcDevnet<SolanaRpcApiDevnet>
+    ) =>
+      rpc
+        .getTransaction(signature as Signature, {
+          encoding: "jsonParsed",
+          maxSupportedTransactionVersion: 0,
+        })
+        .send();
+
+    let rpc: RpcMainnet<SolanaRpcApiMainnet> | RpcDevnet<SolanaRpcApiDevnet> =
+      this.mainnetRpc;
+    let chainName: ChainName = ChainName.Solana;
+    let transaction = await tryFetch(rpc);
+    if (!transaction) {
+      rpc = this.devnetRpc;
+      chainName = ChainName.SolanaDevnet;
+      transaction = await tryFetch(rpc);
+    }
     console.log({ transaction });
 
     if (!transaction) {
@@ -430,147 +447,146 @@ export class SolanaMessageDecoder {
 
     for (let i = 0; i < message.instructions.length; i++) {
       const ix = message.instructions[i];
-      if (ix.programId === bridgeProgram[ChainName.SolanaDevnet]) {
+      // Treat seeing any recognizable bridge instruction as "bridgeSeen"
+      const rawIxData = (ix as any).data as string | Uint8Array | undefined;
+      if (rawIxData && this.isRelayMessageCall(ix)) {
         bridgeSeen = true;
-        if (this.isRelayMessageCall(ix)) {
-          // Lookup accounts
-          if ("accounts" in ix) {
-            const encodedAccts = await fetchEncodedAccounts(
-              rpc,
-              ix.accounts.map((acct) => acct)
-            );
+        // Lookup accounts
+        if ("accounts" in ix) {
+          const encodedAccts = await fetchEncodedAccounts(
+            rpc,
+            ix.accounts.map((acct) => acct)
+          );
 
-            for (let j = 0; j < encodedAccts.length; j++) {
-              const encodedAcct = encodedAccts[j];
-              if (this.isIncomingMessage(encodedAcct)) {
-                return {
-                  kind: ResultKind.IncomingMessage,
-                  encodedAcct,
-                  transaction,
-                  isMainnet,
-                };
-              }
-            }
-          }
-        }
-
-        // Fallback: detect initial bridge instructions without relying on innerInstructions
-        try {
-          const rawIxData = (ix as any).data as string | Uint8Array | undefined;
-          if (!rawIxData) {
-            // If this instruction is fully parsed and has no raw data, skip
-            throw new Error("No raw data on instruction");
-          }
-          const data =
-            typeof rawIxData === "string"
-              ? getBase58Codec().encode(rawIxData)
-              : (rawIxData as Uint8Array);
-
-          // Normalize accounts to AccountMeta[] expected by parse*Instruction helpers
-          const accountKeys = (message as any)?.accountKeys ?? [];
-          const metas =
-            (ix as any).accounts?.map((acct: any) => {
-              let pubkeyStr: string | undefined;
-              if (typeof acct === "string") pubkeyStr = acct;
-              else if (typeof acct === "number") {
-                const entry = accountKeys[acct];
-                pubkeyStr = entry?.pubkey ?? entry?.address;
-              } else if (acct && typeof acct === "object") {
-                pubkeyStr = (acct.pubkey ?? acct.address) as string | undefined;
-              }
-              const keyInfo =
-                accountKeys.find(
-                  (k: any) => (k.pubkey ?? k.address) === pubkeyStr
-                ) ?? {};
-              return {
-                address: pubkeyStr,
-                isSigner: Boolean(keyInfo.signer),
-                isWritable: Boolean(keyInfo.writable),
-              } as any;
-            }) ?? [];
-
-          const tryMatch = (
-            discriminator: ReadonlyUint8Array,
-            parseFn: (instruction: any) => { accounts: any }
-          ): string | undefined => {
-            if (
-              data.length >= discriminator.length &&
-              discriminator.every((b, k) => data[k] === b)
-            ) {
-              const parsed = parseFn({
-                programAddress: ix.programId,
-                accounts: metas,
-                data,
-              } as any);
-              const omMeta = (parsed.accounts?.outgoingMessage ??
-                parsed.accounts?.message ??
-                undefined) as { address?: string } | string | undefined;
-              const omAddr =
-                typeof omMeta === "string" ? omMeta : omMeta?.address;
-              return omAddr;
-            }
-            return undefined;
-          };
-
-          const outgoingMessageAddr =
-            tryMatch(
-              getBridgeSolDiscriminatorBytes(),
-              parseBridgeSolInstruction
-            ) ||
-            tryMatch(
-              getBridgeSolWithBufferedCallDiscriminatorBytes(),
-              parseBridgeSolWithBufferedCallInstruction
-            ) ||
-            tryMatch(
-              getBridgeSplDiscriminatorBytes(),
-              parseBridgeSplInstruction
-            ) ||
-            tryMatch(
-              getBridgeWrappedTokenDiscriminatorBytes(),
-              parseBridgeWrappedTokenInstruction
-            );
-
-          // Also detect proveMessage and proveMessageBuffered (incoming message)
-          const incomingMessageAddr =
-            tryMatch(
-              getProveMessageDiscriminatorBytes(),
-              parseProveMessageInstruction
-            ) ||
-            tryMatch(
-              getProveMessageBufferedDiscriminatorBytes(),
-              parseProveMessageBufferedInstruction
-            );
-
-          if (outgoingMessageAddr) {
-            const encodedAcct = await fetchEncodedAccount(
-              rpc,
-              address(outgoingMessageAddr)
-            );
-            if (this.isOutgoingMessage(encodedAcct)) {
-              return {
-                kind: ResultKind.Message,
-                encodedAcct,
-                transaction,
-                isMainnet,
-              };
-            }
-          } else if (incomingMessageAddr) {
-            const encodedAcct = await fetchEncodedAccount(
-              rpc,
-              address(incomingMessageAddr)
-            );
+          for (let j = 0; j < encodedAccts.length; j++) {
+            const encodedAcct = encodedAccts[j];
             if (this.isIncomingMessage(encodedAcct)) {
               return {
                 kind: ResultKind.IncomingMessage,
                 encodedAcct,
                 transaction,
-                isMainnet,
+                isMainnet: chainName === ChainName.Solana,
               };
             }
           }
-        } catch (e) {
-          // Ignore and continue; we'll try other strategies below.
         }
+      }
+
+      // Fallback: detect initial bridge instructions without relying on program address
+      try {
+        const rawIx = (ix as any).data as string | Uint8Array | undefined;
+        if (!rawIx) {
+          // If this instruction is fully parsed and has no raw data, skip
+          throw new Error("No raw data on instruction");
+        }
+        const data =
+          typeof rawIx === "string"
+            ? getBase58Codec().encode(rawIx)
+            : (rawIx as Uint8Array);
+
+        // Normalize accounts to AccountMeta[] expected by parse*Instruction helpers
+        const accountKeys = (message as any)?.accountKeys ?? [];
+        const metas =
+          (ix as any).accounts?.map((acct: any) => {
+            let pubkeyStr: string | undefined;
+            if (typeof acct === "string") pubkeyStr = acct;
+            else if (typeof acct === "number") {
+              const entry = accountKeys[acct];
+              pubkeyStr = entry?.pubkey ?? entry?.address;
+            } else if (acct && typeof acct === "object") {
+              pubkeyStr = (acct.pubkey ?? acct.address) as string | undefined;
+            }
+            const keyInfo =
+              accountKeys.find(
+                (k: any) => (k.pubkey ?? k.address) === pubkeyStr
+              ) ?? {};
+            return {
+              address: pubkeyStr,
+              isSigner: Boolean(keyInfo.signer),
+              isWritable: Boolean(keyInfo.writable),
+            } as any;
+          }) ?? [];
+
+        const tryMatch = (
+          discriminator: ReadonlyUint8Array,
+          parseFn: (instruction: any) => { accounts: any }
+        ): string | undefined => {
+          if (data.length >= discriminator.length &&
+            discriminator.every((b, k) => data[k] === b)) {
+            const parsed = parseFn({
+              programAddress: ix.programId,
+              accounts: metas,
+              data,
+            } as any);
+            const omMeta = (parsed.accounts?.outgoingMessage ??
+              parsed.accounts?.message ??
+              undefined) as { address?: string } | string | undefined;
+            const omAddr = typeof omMeta === "string" ? omMeta : omMeta?.address;
+            return omAddr;
+          }
+          return undefined;
+        };
+
+        const outgoingMessageAddr =
+          tryMatch(
+            getBridgeSolDiscriminatorBytes(),
+            parseBridgeSolInstruction
+          ) ||
+          tryMatch(
+            getBridgeSolWithBufferedCallDiscriminatorBytes(),
+            parseBridgeSolWithBufferedCallInstruction
+          ) ||
+          tryMatch(
+            getBridgeSplDiscriminatorBytes(),
+            parseBridgeSplInstruction
+          ) ||
+          tryMatch(
+            getBridgeWrappedTokenDiscriminatorBytes(),
+            parseBridgeWrappedTokenInstruction
+          );
+
+        // Also detect proveMessage and proveMessageBuffered (incoming message)
+        const incomingMessageAddr =
+          tryMatch(
+            getProveMessageDiscriminatorBytes(),
+            parseProveMessageInstruction
+          ) ||
+          tryMatch(
+            getProveMessageBufferedDiscriminatorBytes(),
+            parseProveMessageBufferedInstruction
+          );
+
+        if (outgoingMessageAddr) {
+          bridgeSeen = true;
+          const encodedAcct = await fetchEncodedAccount(
+            rpc,
+            address(outgoingMessageAddr)
+          );
+          if (this.isOutgoingMessage(encodedAcct)) {
+            return {
+              kind: ResultKind.Message,
+              encodedAcct,
+              transaction,
+              isMainnet: chainName === ChainName.Solana,
+            };
+          }
+        } else if (incomingMessageAddr) {
+          bridgeSeen = true;
+          const encodedAcct = await fetchEncodedAccount(
+            rpc,
+            address(incomingMessageAddr)
+          );
+          if (this.isIncomingMessage(encodedAcct)) {
+            return {
+              kind: ResultKind.IncomingMessage,
+              encodedAcct,
+              transaction,
+              isMainnet: chainName === ChainName.Solana,
+            };
+          }
+        }
+      } catch (e) {
+        // Ignore and continue; we'll try other strategies below.
       }
     }
 
@@ -594,12 +610,7 @@ export class SolanaMessageDecoder {
 
         const { info } = ix.parsed;
 
-        if (
-          !info ||
-          !("owner" in info) ||
-          !("newAccount" in info) ||
-          info.owner !== bridgeProgram[chainName]
-        ) {
+        if (!info || !("owner" in info) || !("newAccount" in info)) {
           continue;
         }
 

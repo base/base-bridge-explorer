@@ -78,8 +78,13 @@ export const InputForm = ({
 
         let initialTx: InitialTxDetails;
         if (!initTxDetails && pubkey) {
+          const isBaseMainnet =
+            validationTxDetails?.chain === ChainName.Base ||
+            executeTxDetails?.chain === ChainName.Base;
           const res = await fetch(
-            `/api/solana/initTxFromPubkey?pubkey=${pubkey}`
+            `/api/solana/initTxFromPubkey?pubkey=${pubkey}&isMainnet=${Boolean(
+              isBaseMainnet
+            )}`
           );
           if (!res.ok) {
             console.error(res);

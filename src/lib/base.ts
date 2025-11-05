@@ -285,9 +285,17 @@ export class BaseMessageDecoder {
   }
 
   private async identifyBaseTx(hash: Hash) {
-    const client = this.baseSepoliaClient;
-    this.recognizedChainId = client.chain.id;
-    const receipt = await client.getTransactionReceipt({ hash });
+    // Try Base mainnet first, then Base Sepolia
+    let client = this.baseClient;
+    let receipt: TransactionReceipt | undefined;
+    try {
+      receipt = await client.getTransactionReceipt({ hash });
+      this.recognizedChainId = client.chain.id;
+    } catch (e) {
+      client = this.baseSepoliaClient;
+      receipt = await client.getTransactionReceipt({ hash });
+      this.recognizedChainId = client.chain.id;
+    }
     console.log({ receipt });
     const { logs } = receipt;
 
